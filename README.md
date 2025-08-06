@@ -1,69 +1,20 @@
-@PostMapping("/callback/{refId}")
-public ResponseEntity<String> receiveCallback(@PathVariable String refId, @RequestBody Map<String, String> payload) {
-    String status = payload.getOrDefault("status", "FAILURE");
-    paymentService.completeTransaction(refId, status);
-    return ResponseEntity.ok("Callback received for " + refId);
-}
+I need a Java utility class called `SSLUtils` that builds an `SSLContext` from two PEM files:
 
-public void completeTransaction(String refId, String status) {
-    SseEmitter emitter = emitters.get(refId);
-    if (emitter != null) {
-        try {
-            emitter.send(status);
-            emitter.complete();
-        } catch (IOException e) {
-            emitter.completeWithError(e);
-        }
-    }
-}
+1. `newcert.pem` — contains both the client certificate and CA certificate chain.
+2. `key-dev-client.pem` — contains the client private key in PKCS#8 format.
 
-public String createTransaction() {
-    String refId = UUID.randomUUID().toString();
-    SseEmitter emitter = new SseEmitter(0L);
-    emitters.put(refId, emitter);
-    return refId;
-}
+Requirements:
+- Method signature: `public static SSLContext buildSSLContextFromStrings(String combinedCertData, String clientKeyData, String clientKeyPassword)`
+- Parse multiple certificates from `combinedCertData` using regex.
+- First certificate is the client cert; the rest are CA certs.
+- Load the private key from `clientKeyData` (unencrypted PKCS#8).
+- Create a `KeyStore` with the client cert and private key.
+- Create a `TrustStore` with the CA certs.
+- Initialize `KeyManagerFactory` and `TrustManagerFactory`.
+- Return a fully initialized `SSLContext`.
 
-<button onclick="makePayment()">Start Payment</button>
-<button onclick="simulateCallback()">Simulate NBBL Callback</button>
-<p id="status"></p>
+Also include helper methods:
+- `parseCertificates(String pemData)` — returns a list of `X509Certificate`.
+- `parsePrivateKey(String pemKeyData)` — returns a `PrivateKey`.
 
-<script>
-  let currentRefId = null;
-
-  function makePayment() {
-    fetch("/pay", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ amount: 100 })
-    })
-    .then(res => res.json())
-    .then(({ refId, status, errorMessage }) => {
-      if (status === "INITIATED") {
-        currentRefId = refId;
-        const source = new EventSource(`/pay/status/${refId}`);
-        source.onmessage = e => {
-          document.getElementById("status").innerText = e.data;
-          if (["SUCCESS", "FAILURE"].includes(e.data)) source.close();
-        };
-      } else {
-        alert("Error: " + errorMessage);
-      }
-    });
-  }
-
-  function simulateCallback() {
-    if (!currentRefId) {
-      alert("Please initiate a payment first.");
-      return;
-    }
-
-    fetch(`/pay/callback/${currentRefId}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status: "SUCCESS" }) // or "FAILURE"
-    })
-    .then(res => res.text())
-    .then(msg => alert(msg));
-  }
-</script>
+Use standard Java libraries only (no BouncyCastle). Make sure to handle whitespace and PEM headers correctly.
