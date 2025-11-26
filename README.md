@@ -18,3 +18,28 @@ Also include helper methods:
 - `parsePrivateKey(String pemKeyData)` — returns a `PrivateKey`.
 
 Use standard Java libraries only (no BouncyCastle). Make sure to handle whitespace and PEM headers correctly.
+
+
+
+I am trying to do this way
+
+    @GetMapping(value = "/status/{refId}", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter streamStatus(@PathVariable String refId) {
+        System.out.println("[Servlet Thread] " + Thread.currentThread() + ", isVirtual: " + Thread.currentThread().isVirtual());
+        SseEmitter emitter = new SseEmitter();
+        Thread.startVirtualThread(() -> {
+            System.out.println("[Virtual Thread] " + Thread.currentThread() + ", isVirtual: " + Thread.currentThread().isVirtual());
+            try {
+                SseEmitter realEmitter = paymentService.getStatusStream(refId);
+                // Forward events from realEmitter to this emitter
+                realEmitter.onCompletion(emitter::complete);
+                realEmitter.onTimeout(emitter::complete);
+                realEmitter.onError(emitter::completeWithError);
+                // Optionally, you can forward data events as well if needed
+            } catch (Exception e) {
+                emitter.completeWithError(e);
+            }
+        });
+        System.out.println("[Servlet Thread] Returning response and releasing servlet thread: " + Thread.currentThread());
+        return emitter;
+    }
