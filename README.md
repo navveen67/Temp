@@ -1,52 +1,120 @@
-To get the highest quality output from an AI, you need to provide it with a **System Role**, a **Clear Framework for Analysis**, and **Specific Output Formats**.
+As a Senior Architect, I will help you refine this logic. First, let's address the naming and the design patterns, then I will provide the production-ready Java implementation.
 
-Here is a "Highly Effective Prompt" designed to turn the AI into an Elite Senior Architect. 
+### 1. Naming & Logic Improvements
 
-***
+The name `titleMessageboolean` is a bit redundant because it includes the data type in the name (Hungarian notation), which is generally avoided in modern Java. `resolvetitleMegtobeDisplayedornot` is also slightly wordy.
 
-### The Optimized Prompt
+**Architectural Suggestions for Naming:**
+*   **Variable Name:** `shouldDisplayTitleError` or `useGenericTitle`.
+*   **Method Name:** `isTitleMessageRequired(String errCode)` or `shouldShowTitle(String errCode)`.
 
-> **Role:** You are an Elite Senior Software Architect and Performance Systems Engineer with 20+ years of experience in distributed systems and high-throughput API design. Your specialty is "Deep Code Forensic Analysis" and architectural visualization.
->
-> **Task:** I am providing you with a main API method and its associated nested methods. Your goal is to perform a comprehensive, multi-dimensional analysis to assist my team in performance tuning, logic comprehension, and robust testing.
->
-> **Analysis Requirements:**
-> Please analyze the provided code through the following lenses:
->
-> 1. **Deep Logic Trace:** Trace every execution path, including nested internal helper methods, conditional branches, and external dependencies.
-> 2. **Performance Hotspot Identification:** Identify potential latency bottlenecks (e.g., N+1 queries, heavy computational loops, synchronous blocking calls, or redundant data transformations).
-> 3. **Side-Effect Map:** Document every state change, database mutation, or external API call that occurs within the flow.
-> 4. **Complexity Scoring:** Evaluate the cyclomatic complexity and suggest where refactoring is needed for better maintainability.
->
-> **Deliverables:**
->
-> **Part 1: Detailed Technical Documentation**
-> *   **Functional Overview:** A high-level summary of what the API achieves.
-> *   **Method Breakdown Table:** A list of every nested method called, its responsibility, and its performance impact.
-> *   **Optimization Recommendations:** Specific, actionable suggestions to improve execution speed and memory footprint.
-> *   **Testing Strategy:** A list of critical "Robustness Vectors" (edge cases, failure modes, and boundary conditions) the team must test.
->
-> **Part 2: Visual Flowchart (Mermaid.js)**
-> *   Create a highly detailed **Mermaid.js flowchart** representing the entire logic flow. 
-> *   Use different shapes or colors for: **API Entry/Exit, Decision Diamonds, Database Operations, and External Service calls.**
-> *   Ensure the flowchart includes the nested method logic, not just the top-level calls.
->
-> **Constraint:** Be extremely precise. If there is ambiguity in the code, flag it as a "Technical Risk."
->
-> **[PASTE YOUR CODE HERE]**
+**Design Pattern Choice:**
+Since these error codes are static business rules, using a **`HashSet`** provides $O(1)$ constant time lookup, which is the most performant way to handle this in memory.
 
-***
+---
 
-### Why this prompt works:
-1.  **Sets a High Bar:** By calling it an "Elite Senior Architect," you prime the AI to use professional terminology and look for deeper architectural flaws rather than just explaining what the code does.
-2.  **Mermaid.js:** Most LLMs (ChatGPT, Claude) can write code for `Mermaid.js`. You can copy-paste the output into the [Mermaid Live Editor](https://mermaid.live/) to get a professional, high-res image instantly.
-3.  **Performance Focus:** It specifically asks for "Latency Bottlenecks" and "N+1 queries," which are the most common issues in API performance.
-4.  **Testing Strategy:** Instead of just "how to test," it asks for "Robustness Vectors," which forces the AI to think about how the code might break under stress or weird inputs.
+### 2. Implementation: `ErrorResolutionHelper.java`
 
-### Pro-Tip for usage:
-If your code is spread across multiple files, you should paste them in this order:
-1.  The Main API Controller/Handler method.
-2.  The Service layer methods it calls.
-3.  The Repository/Data access methods. 
+I recommend creating a utility class with an immutable set for maximum performance and thread safety.
 
-(Simply label them like: `--- Service Layer --- [Code]`)
+```java
+package com.yourcompany.util;
+
+import java.util.Set;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Arrays;
+
+/**
+ * Senior Architect Design: Error Resolution Helper
+ * Purpose: Determines if FE should display a generic title message or specific BE message.
+ */
+public final class ErrorResolutionHelper {
+
+    // Set containing error codes that require a Title Message to be displayed
+    private static final Set<String> TITLE_MESSAGE_ERROR_CODES;
+
+    static {
+        // Initializing with the codes provided
+        Set<String> codes = new HashSet<>(Arrays.asList(
+            "ERR_ISS_MFA_001",
+            "ERR_ISS_MFA_002",
+            "ERR_ISS_MFA_003",
+            "ERR_ISS_MFA_004",
+            "ERR_ISS_PRM_001"
+        ));
+        // Make it unmodifiable to ensure internal state cannot be tampered with
+        TITLE_MESSAGE_ERROR_CODES = Collections.unmodifiableSet(codes);
+    }
+
+    // Private constructor to prevent instantiation of utility class
+    private ErrorResolutionHelper() {}
+
+    /**
+     * Checks if the provided error code maps to a Title Error display requirement.
+     * 
+     * @param errorCode The code returned from the backend logic
+     * @return true if FE should show title message; false otherwise
+     */
+    public static boolean shouldDisplayTitleError(String errorCode) {
+        if (errorCode == null || errorCode.isEmpty()) {
+            return false;
+        }
+        return TITLE_MESSAGE_ERROR_CODES.contains(errorCode);
+    }
+}
+```
+
+---
+
+### 3. Integration Example
+
+In your main API method or response mapper, you would use it like this:
+
+```java
+// Logic inside your API controller or Service
+String errCode = "ERR_ISS_MFA_001"; // Logic to get error code
+
+// Clean, readable, and architecturally sound
+boolean displayTitleError = ErrorResolutionHelper.shouldDisplayTitleError(errCode);
+
+// Add this to your Response Object
+response.setShouldDisplayTitleError(displayTitleError);
+```
+
+---
+
+### 4. Why this is "High Performance" and "Robust":
+
+1.  **Memory Performance:** The `HashSet` lookup is significantly faster than a `Switch` statement or `List.contains()` as the list of codes grows.
+2.  **Immutability:** Using `Collections.unmodifiableSet` ensures that the list of codes cannot be changed at runtime by other parts of the application, preventing bugs.
+3.  **Null Safety:** The helper method includes a null/empty check to prevent `NullPointerException` during the lookup.
+4.  **Clean API for FE:** Returning a boolean called `shouldDisplayTitleError` (or similar) is very explicit. The FE developer doesn't have to guess; they simply write `if (data.shouldDisplayTitleError) { ... }`.
+
+### 5. Alternative: The Enum Approach
+If you plan to add **more metadata** later (e.g., specific Title Strings for each code), use an **Enum**:
+
+```java
+public enum ErrorCategory {
+    ERR_ISS_MFA_001(true),
+    ERR_ISS_MFA_002(true),
+    // ... add others
+    ERR_OTHER_CODE(false);
+
+    private final boolean displayTitle;
+
+    ErrorCategory(boolean displayTitle) {
+        this.displayTitle = displayTitle;
+    }
+
+    public static boolean isTitleRequired(String code) {
+        try {
+            return ErrorCategory.valueOf(code).displayTitle;
+        } catch (IllegalArgumentException e) {
+            return false; // Code not found in enum
+        }
+    }
+}
+```
+
+**Architect's Recommendation:** Use the **HashSet Utility (Option 2)** if you just need a simple True/False check. It is easier to maintain and faster to implement for simple error flagging.
