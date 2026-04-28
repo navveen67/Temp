@@ -1,68 +1,92 @@
-To modify an existing sequence to work with your high-performance allocationSize
-= 50 configuration, use the following script.
+This Confluence page is designed to onboard any developer in 5 minutes. It focuses on **intent** and **usage** rather than complex theory.
 
-1. The Alter Script (Standard SQL / PostgreSQL / Oracle)
+---
 
-This script changes the increment logic without deleting your existing sequence
-data.
+# 🏗️ Core Persistence Framework (SPF) Guide
 
--- 1. Change the increment to 50 to match Java's allocationSize
--- 2. Set CACHE to 1 to ensure the DB and Hibernate stay perfectly in sync
-ALTER SEQUENCE sdk_key_ID_SEQ 
-INCREMENT BY 50 
-CACHE 1;
+## 1. Overview
+The **Standard Persistence Framework (SPF)** is our centralized engine for Database and Cache operations. It ensures **High Performance**, **Automatic DB-Fallback**, and **Unified Logging** across all 40+ tables in our Payment System.
 
-2. Senior Architect's "Alignment" Step (Very Important)
+### Why use it?
+*   **Zero Junk Logs:** Every log follows a searchable `[STATUS][DOMAIN][ACTION]` pattern.
+*   **Performance:** Automatically handles Aerospike caching for speed.
+*   **Robustness:** If the Cache is down, it silently falls back to the DB without breaking the payment.
 
-When you change an INCREMENT BY from 1 to 50, there is a risk that the "Current
-Value" in the database is not a "round number." Hibernate prefers the sequence
-to be aligned to the allocationSize.
+---
 
-I recommend you "Restart" the sequence at the next logical 50-increment to avoid
-any ID collisions with existing data.
+## 2. Which Manager do I use?
 
-Example: If your current max ID in the table is 124, restart the sequence at 150
-or 200.
+| Scenario | Use This Abstract Class | Features |
+| :--- | :--- | :--- |
+| **High Frequency** (ReqFetch, OTP, Session) | `AbstractCacheAsideManager` | Cache Read -> DB Fallback -> Cache Sync |
+| **Audit/History** (Logs, Status History) | `AbstractDbOnlyManager` | Direct DB Persistence (No Cache) |
 
--- Replace '200' with a value higher than your current MAX(id)
-ALTER SEQUENCE sdk_key_ID_SEQ 
-RESTART WITH 200 
-INCREMENT BY 50 
-CACHE 1;
+---
 
-3. How to Verify the Change
+## 3. Implementation Steps (Example: `OtpDataManager`)
 
-Run this query to confirm the database engine has updated the metadata
-correctly:
+### Step 1: Create the Manager
+Extend the appropriate base class and implement the "Hooks."
 
-For PostgreSQL:
+```java
+@Component
+public class OtpDataManager extends AbstractCacheAsideManager<OtpEntity, OtpCacheDTO> {
+    
+    @Override protected String getDomain() { return "OTP-VERIFY"; }
+    @Override protected String getIdentifier(OtpEntity e) { return e.getRefId(); }
 
-SELECT sequence_name, increment_by, last_value 
-FROM information_schema.sequences 
-WHERE sequence_name = 'sdk_key_ID_SEQ';
+    // Implement the 4 basic I/O methods:
+    @Override protected void dbWrite(OtpEntity e) { repo.save(e); }
+    @Override protected OtpEntity dbRead(String id) { return repo.findById(id); }
+    @Override protected void cacheWrite(String id, OtpCacheDTO d) { aerospike.put(..., d); }
+    @Override protected OtpCacheDTO cacheRead(String id) { return aerospike.get(...); }
+    
+    // Wire your Mapper
+    @Override protected OtpCacheDTO mapToCacheDto(OtpEntity e) { return mapper.toDto(e); }
+    @Override protected OtpEntity mapToEntity(OtpCacheDTO d) { return mapper.toEntity(d); }
+}
+```
 
-For Oracle:
+---
 
-SELECT sequence_name, increment_by, cache_size 
-FROM all_sequences 
-WHERE sequence_name = 'SDK_KEY_ID_SEQ';
+## 4. Usage in your Service
+**Rule:** Never inject the Repository or AerospikeUtil directly into your Service. **Only inject the Orchestrator.**
 
-4. Why this script is "Highly Effective" for your team:
+```java
+@Service
+public class PaymentService {
 
-  - Zero Downtime: This script can be run while the application is live (though
-    a restart of the App Server is recommended so Hibernate picks up the new
-    allocationSize config).
-  - Synchronicity: By setting CACHE 1, you prevent the "Double Caching" problem
-    we discussed. The database acts as the source of truth, and Hibernate acts
-    as the high-speed buffer.
-  - Scalability: This change prepares your API to handle 50x more inserts with
-    the same database load.
+    // Inject using the interface and the Bean Name
+    @Autowired 
+    private DataOrchestrator<OtpEntity> otpDataManager;
 
-⚠️ One Final Warning for the Team:
+    public void verify(String refId) {
+        // Fetch: Automatic Cache -> DB logic
+        OtpEntity otp = otpDataManager.find(refId);
 
-If you have multiple instances of your application running (e.g., in a
-Kubernetes cluster), once you apply this SQL script, all instances must be
-updated to use allocationSize = 50 in the Java code.
+        // Save: Automatic DB -> Cache logic
+        otpDataManager.save(otp);
+    }
+}
+```
 
-If one instance still has allocationSize = 1, it will jump by 50 every time it
-saves a single record, causing your IDs to exhaust very quickly!
+---
+
+## 5. How to Track in Logs (Splunk/ELK)
+All operations generate standardized "Breadcrumbs." Search by your Domain tag:
+
+*   `[START][OTP-VERIFY][FETCH]` : Request initiated.
+*   `[HIT][OTP-VERIFY][FETCH]` : Data served from Aerospike (Fast!).
+*   `[MISS][OTP-VERIFY][FETCH]` : Data fetched from DB (Slow).
+*   `[SUCCESS][OTP-VERIFY][SAVE]` : DB and Cache are in sync.
+*   `[CRITICAL-FAIL][OTP-VERIFY][SAVE]` : Database error (Check RDS logs).
+
+---
+
+## 🛑 Rules of the Framework
+1.  **Naming:** Domain names must be UPPERCASE (e.g., `REQ-FETCH`, `PAY-AUDIT`).
+2.  **No Logic in Managers:** Managers are for Data Access only. Put Business Logic in the `@Service`.
+3.  **Fail-Safe:** Base classes already handle `try-catch`. Do not add extra `try-catch` blocks inside your Manager implementation unless specifically required.
+
+---
+**Questions?** Contact the System Architect.
