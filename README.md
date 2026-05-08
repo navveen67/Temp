@@ -1,23 +1,93 @@
-This is a critical part of a Payment Gateway. If the OTP logic is weak, it becomes a security vulnerability; if it's too strict, it kills the conversion rate.
+To maintain your high standard for the "Payment Factory" project, I have updated your template to include a **Testing Matrix & Data Validation** section. This section specifically helps QA understand not just what the API returns, but also what to verify in the **Database and Cache (Aerospike/Redis)**.
 
-Here is a comprehensive **OTP Testing Matrix** for your Confluence page, designed to ensure a robust delivery.
+Here is the updated Confluence Template.
 
 ---
 
-# Confluence Page: OTP Lifecycle Testing Scenarios (Generate & Verify)
+### 1. Generic Template (Blank)
+*Developers: Please copy this section and fill it out for every new feature release.*
 
-## 1. Business Rules Summary
-*   **Max Generation Limit:** 3 Attempts per Transaction/Reference ID.
-*   **Max Validation Limit:** 3 Attempts per Transaction/Reference ID.
-*   **Validity Window:** 15 Minutes (as per transaction TTL).
-*   **Cool-down Period:** (Optional - usually 60s between resends).
+**[Feature Name]**
+*   **Jira Ticket:** [Link to Jira]
+*   **Feature Toggle/Flag:** [Property Name]
+*   **Microservice:** [Service Name]
 
-## 2. OTP Testing Matrix
+**Technical Entry Points**
+*   **API Endpoint:** [Method] [URL]
+*   **Async Trigger:** [Topic/Queue/Cron Name]
 
-| ID | Category | Scenario | Steps | Expected Result |
+**Persistence Layer (Database & Cache)**
+*   **Primary Tables:** [List of tables]
+*   **Cache Key/Namespace:** [e.g., Aerospike Namespace/Sets]
+*   **Data Behavior:** [e.g., Cache-Aside logic, TTL duration]
+
+**Observability (Logs & Tracking)**
+*   **Trace ID / Correlation ID:** [e.g., refId]
+*   **Log Markers:** `[START_MARKER]`, `[SUCCESS_MARKER]`, `[FAIL_MARKER]`, `[WARN_MARKER]`
+
+**Testing Matrix (Functional & Data Integrity)**
+
+| Category | Scenario | Test Steps | Expected Result | Data/State Verification |
 |:---|:---|:---|:---|:---|
-| **P1** | **Positive** | Happy Path (1+1) | Generate 1 OTP -> Enter correct OTP immediately. | Success. Transaction proceeds to Payment API. |
-| **P2** | **Positive** | Resend Success | Generate 1st -> (Wait 60s) -> Generate 2nd -> Enter 2nd OTP. | Success. Previous OTP is invalidated; latest is accepted. |
+| **Positive** | [Name] | [Steps] | [API Response] | [Check DB/Cache value] |
+| **Negative** | [Name] | [Steps] | [Error Code] | [Check retry counters] |
+| **Edge** | [Name] | [Steps] | [Behavior] | [Cleanup check] |
+
+---
+
+### 2. Example Implementation (OTP Generate & Verify)
+*Example of a completed handover for your current task.*
+
+**OTP Lifecycle Management (Gen/Verify)**
+*   **Jira Ticket:** [PAY-8820]
+*   **Feature Toggle:** `payment-service.otp.v2.enabled=true`
+*   **Microservice:** `payment-gateway-service`
+
+**Technical Entry Points**
+*   **API 1:** `POST /v1/otp/generate`
+*   **API 2:** `POST /v1/otp/verify`
+
+**Persistence Layer (Database & Cache)**
+*   **Primary Tables:** `generate_otp`, `validate_otp`, `pay_txn_master`
+*   **Cache Strategy:** **Cache-Aside (Aerospike).** 
+    *   Set: `OTP_SESSION_SET` 
+    *   Key: `refId`
+    *   TTL: 15 Minutes.
+*   **Data Behavior:** On `verify`, atomic counter in Aerospike increments. On `success`, Cache is cleared or status updated to `VERIFIED`.
+
+**Observability (Logs & Tracking)**
+*   **Trace ID:** Search logs using `refId`.
+*   **Log Context & Markers:**
+    *   `[OTP-GEN-START]` / `[OTP-GEN-SUCCESS]`
+    *   `[OTP-VAL-START]` / `[OTP-VAL-SUCCESS]`
+    *   `[OTP-RETRY-COUNT]` — Tracking attempt numbers.
+    *   `[OTP-LIMIT-EXHAUST]` — Logged when max attempts hit.
+
+**Testing Matrix (OTP Specifics)**
+
+| Category | Scenario | Test Steps | Expected Result | Data/State Verification |
+|:---|:---|:---|:---|:---|
+| **Positive** | Happy Path | 1 Gen -> 1 Correct Verify | 200 OK / Success | DB: `otp_status` = 'V'. Cache: Record deleted/updated. |
+| **Negative** | Gen Exhaustion | Attempt Gen 4 times | 429 Too Many Requests | DB: `generate_otp` has 3 rows. Cache: `gen_count` = 3. |
+| **Negative** | Val Exhaustion | 3 Wrong OTP attempts | 401 Unauthorized | Cache: `val_count` = 3. Transaction blocked. |
+| **Edge** | Stale OTP | Gen -> Wait 16 mins -> Verify | 410 Gone / Expired | DB: `txn_status` = 'EXPIRED'. Cache: Key should be missing. |
+| **Edge** | Success Replay | Verify correctly -> Attempt Verify again | 400 Bad Request | API should reject because status is already 'V'. |
+
+**Error & Response Mapping**
+
+| Error Condition | Code | Status | Level |
+|:---|:---|:---|:---|
+| OTP Generation Maxed | ERR-OTP-001 | 429 Too Many Requests | WARN |
+| Incorrect OTP | ERR-OTP-002 | 401 Unauthorized | INFO |
+| OTP Validation Maxed | ERR-OTP-003 | 403 Forbidden | WARN |
+| External SMS Provider Down | ERR-OTP-503 | 503 Service Unavail | ERROR |
+
+---
+
+### Why this works for your team:
+1.  **Clear Expectations:** The "Data/State Verification" column forces the developer to think about Aerospike and the DB, not just the JSON response.
+2.  **QA Empowerment:** The testing team knows exactly which table to query to confirm the logic is working.
+3.  **Audit Trail:** If a transaction fails in production, anyone can look at the "Log Markers" section and immediately know what to search for in Splunk/Dynatrace.| **P2** | **Positive** | Resend Success | Generate 1st -> (Wait 60s) -> Generate 2nd -> Enter 2nd OTP. | Success. Previous OTP is invalidated; latest is accepted. |
 | **P3** | **Positive** | Limit Boundary (3rd Gen) | Generate 1st -> Generate 2nd -> Generate 3rd -> Enter 3rd OTP. | Success. 3rd attempt is allowed and works. |
 | **P4** | **Positive** | Limit Boundary (3rd Val) | Generate 1st -> Enter Wrong -> Enter Wrong -> Enter Correct (3rd try). | Success. User allowed to pay on the last valid attempt. |
 | **N1** | **Negative** | Gen Limit Exhausted | Attempt to generate OTP for the **4th time**. | **Error:** "Maximum OTP generation limit reached." |
