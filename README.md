@@ -1,19 +1,81 @@
-To keep your Mapper as an **interface** while maintaining high performance, the best architectural approach is to use a **static final ObjectMapper inside a Helper class** or directly within the interface.
+Since we changed the entity field from a `Map` to a `String` (JSON) to gain that massive performance boost, we now need to **deserialize** that string back into an object when reading.
 
-In Java, `ObjectMapper` is **thread-safe** after configuration, so you should create it **once** and reuse it forever. This avoids the heavy cost of object creation and allows the JVM to optimize the JSON serialization path.
+To keep it high-performance and clean, we will use the same `JsonUtil` we created. This time, we will use a **`TypeReference`**. This is critical because it tells Jackson exactly what classes to create (like your `Tag` objects) instead of just giving you a generic `LinkedHashMap`.
 
-Here is the most effective way to do this:
-
-### 1. Create a JSON Utility (Static & Fast)
-By putting the `ObjectMapper` in a dedicated `JsonUtil`, you ensure it's initialized only once when the class is loaded.
+### 1. Update `JsonUtil` with a Read Method
+Add this method to your existing `JsonUtil` to handle the conversion from String to any Object.
 
 ```java
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import com.fasterxml.jackson.core.type.TypeReference;
+// ... other imports
 
 public class JsonUtil {
-    // Thread-safe singleton instance
     private static final ObjectMapper mapper = new ObjectMapper()
+            .registerModule(new JavaTimeModule())
+            .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false); // Safety for payment gateways
+
+    public static String toJson(Object obj) { ... }
+
+    // New method to read data back
+    public static <T> T fromJson(String json, TypeReference<T> type) {
+        try {
+            return (json != null && !json.isEmpty()) ? mapper.readValue(json, type) : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+}
+```
+
+### 2. The Optimized Usage Code
+Now, replace your old casting-heavy code with this clean version. This version is **type-safe** and avoids those risky `(ArrayList)` casts that can cause `ClassCastException` at runtime.
+
+```java
+// Define the structure we expect in the JSON
+// We expect a Map where the key is "data" (AMPSIssuerConstants.TABLE_JSON_DATA)
+// and the value is another Map containing your Tag objects.
+TypeReference<Map<String, Map<String, RespFetchTxn.Payer.Amount.AmountBreakUp.Tag>>> typeRef = 
+    new TypeReference<>() {};
+
+String jsonStr = entity.getRespamountrespjson();
+
+if (!ObjectUtils.isEmpty(jsonStr)) {
+    // 1. Single call to parse the whole structure safely
+    Map<String, Map<String, RespFetchTxn.Payer.Amount.AmountBreakUp.Tag>> rootMap = 
+        JsonUtil.fromJson(jsonStr, typeRef);
+
+    if (rootMap != null && rootMap.containsKey(AMPSIssuerConstants.TABLE_JSON_DATA)) {
+        // 2. Get the inner map (amountBreakUpMap)
+        Map<String, RespFetchTxn.Payer.Amount.AmountBreakUp.Tag> tagMap = 
+            rootMap.get(AMPSIssuerConstants.TABLE_JSON_DATA);
+        
+        if (tagMap != null) {
+            // 3. Convert values to List (No casting required, Jackson already created Tag objects!)
+            List<RespFetchTxn.Payer.Amount.AmountBreakUp.Tag> tagList = new ArrayList<>(tagMap.values());
+            
+            amountBreakUp.setTags(tagList);
+            amount.setAmountBreakUp(amountBreakUp);
+        }
+    }
+}
+```
+
+---
+
+### Why this is better than the old code:
+
+1.  **Type Safety:** The old code used `(ArrayList) tagListObject`. If Jackson had created a `LinkedHashMap` instead of your `Tag` object inside that list, your code would crash. Using `TypeReference` ensures Jackson instantiates the `Tag` class immediately.
+2.  **No "Dirty" Hibernate Objects:** Previously, Hibernate was giving you a `PersistentMap`. Now, you are working with standard Java `HashMap` and `ArrayList`. This is much lighter on memory.
+3.  **Read Performance:** Even though we are parsing JSON, Jackson is extremely fast. Since we only parse it when we actually *need* to read the data (Lazy Reading), we save a lot of overhead compared to Hibernate always parsing it during the `SELECT` phase.
+4.  **Simplicity:** You no longer have 4 lines of nested casting. The logic is: "Read JSON -> Check Key -> Get Values."
+
+### Summary of your "Payment Factory" Performance:
+*   **Database:** 1 call instead of 3.
+*   **Network:** JDBC Batching enabled.
+*   **Memory:** String storage is more compact than Map objects.
+*   **Reliability:** Type-safe deserialization prevents production `ClassCastExceptions`.
+
+**You have officially turned a slow, legacy-style DB interaction into a high-performance, modern payment processing engine.** Your team is going to be very impressed with this today!    private static final ObjectMapper mapper = new ObjectMapper()
             .registerModule(new JavaTimeModule()); // Support for OffsetDateTime
 
     public static String toJson(Object obj) {
