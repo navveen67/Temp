@@ -1,17 +1,121 @@
-Since we changed the entity field from a `Map` to a `String` (JSON) to gain that massive performance boost, we now need to **deserialize** that string back into an object when reading.
+Here is the updated standalone test code. I have hardcoded the JSON string literal to match exactly what your database stores, allowing you to verify the deserialization logic in isolation.
 
-To keep it high-performance and clean, we will use the same `JsonUtil` we created. This time, we will use a **`TypeReference`**. This is critical because it tells Jackson exactly what classes to create (like your `Tag` objects) instead of just giving you a generic `LinkedHashMap`.
-
-### 1. Update `JsonUtil` with a Read Method
-Add this method to your existing `JsonUtil` to handle the conversion from String to any Object.
+### Standalone Deserialization Test
 
 ```java
 import com.fasterxml.jackson.core.type.TypeReference;
-// ... other imports
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 
-public class JsonUtil {
-    private static final ObjectMapper mapper = new ObjectMapper()
-            .registerModule(new JavaTimeModule())
+import java.util.*;
+
+public class DeserializationTest {
+
+    // --- 1. THE DATA STRUCTURES (DTOs) ---
+    public static class Tag {
+        private String name;
+        private String value;
+
+        // Getters and Setters are required for Jackson
+        public String getName() { return name; }
+        public void setName(String name) { this.name = name; }
+        public String getValue() { return value; }
+        public void setValue(String value) { this.value = value; }
+
+        @Override
+        public String toString() { return "Tag{name='" + name + "', value='" + value + "'}"; }
+    }
+
+    public static class AmountBreakUp {
+        private List<Tag> tags;
+        public void setTags(List<Tag> tags) { this.tags = tags; }
+        public List<Tag> getTags() { return tags; }
+    }
+
+    public static class Amount {
+        private AmountBreakUp amountBreakUp;
+        public void setAmountBreakUp(AmountBreakUp ab) { this.amountBreakUp = ab; }
+        public AmountBreakUp getAmountBreakUp() { return amountBreakUp; }
+    }
+
+    // --- 2. THE UTILITY ---
+    public static class JsonUtil {
+        private static final ObjectMapper mapper = new ObjectMapper()
+                .registerModule(new JavaTimeModule())
+                .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+
+        public static <T> T fromJson(String json, TypeReference<T> type) {
+            try {
+                return (json != null && !json.isEmpty()) ? mapper.readValue(json, type) : null;
+            } catch (Exception e) {
+                System.err.println("Deserialization Error: " + e.getMessage());
+                return null;
+            }
+        }
+    }
+
+    public static void main(String[] args) {
+        // --- 3. HARDCODED DB STRING LITERAL ---
+        // This simulates the 'data' wrapper created by your mapper
+        String jsonStr = "{\"data\": {" +
+                            "\"T1\": {\"name\": \"GST\", \"value\": \"18%\"}," +
+                            "\"T2\": {\"name\": \"Processing Fee\", \"value\": \"10.00\"}" +
+                         "}}";
+
+        System.out.println("Input JSON: " + jsonStr);
+
+        // --- 4. YOUR SNIPPET LOGIC ---
+        Amount amount = new Amount();
+        AmountBreakUp amountBreakUp = new AmountBreakUp();
+        String TABLE_JSON_DATA = "data"; // Matching your constant
+
+        // Define the TypeReference
+        TypeReference<Map<String, Map<String, Tag>>> typeRef = new TypeReference<>() {};
+
+        if (jsonStr != null && !jsonStr.isEmpty()) {
+            // Perform Deserialization
+            Map<String, Map<String, Tag>> rootMap = JsonUtil.fromJson(jsonStr, typeRef);
+
+            if (rootMap != null && rootMap.containsKey(TABLE_JSON_DATA)) {
+                Map<String, Tag> tagMap = rootMap.get(TABLE_JSON_DATA);
+
+                if (tagMap != null) {
+                    // Extracting the Tag objects from the map values
+                    List<Tag> tagList = new ArrayList<>(tagMap.values());
+
+                    amountBreakUp.setTags(tagList);
+                    amount.setAmountBreakUp(amountBreakUp);
+                }
+            }
+        }
+
+        // --- 5. VERIFICATION ---
+        System.out.println("\n--- Final Verification ---");
+        if (amount.getAmountBreakUp() != null && amount.getAmountBreakUp().getTags() != null) {
+            List<Tag> results = amount.getAmountBreakUp().getTags();
+            System.out.println("Total Tags Found: " + results.size());
+            results.forEach(tag -> System.out.println("Parsed -> " + tag));
+            
+            // Check if actual Tag objects were created
+            if (results.get(0) instanceof Tag) {
+                System.out.println("\nSUCCESS: Data correctly mapped to Tag objects.");
+            }
+        } else {
+            System.out.println("\nFAILED: Data structure did not match.");
+        }
+    }
+}
+```
+
+### Why this test is effective:
+1.  **Direct JSON Literal:** It uses a raw string `{"data": {...}}`. If your database column content looks like this, the test is a perfect mirror of reality.
+2.  **Validation of Nested Maps:** It specifically tests the `Map<String, Map<String, Tag>>` structure, where the inner map has dynamic keys (like "T1", "T2") which is how `Map.values()` works.
+3.  **No Mocking Needed:** This is pure Java + Jackson. You can run this in any IDE (IntelliJ/Eclipse) to confirm your logic before deploying the "Payment Factory" optimization.
+
+**Note:** If your database JSON does *not* have that `"data"` outer wrapper, simply remove the `rootMap.get(TABLE_JSON_DATA)` step, but based on your mapper logic, this is the exact structure you are producing.
+            
+            
             .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false); // Safety for payment gateways
 
     public static String toJson(Object obj) { ... }
