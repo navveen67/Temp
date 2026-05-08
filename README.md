@@ -1,20 +1,94 @@
-Since you are using **Approach 1** with a `Long id` and a `SequenceGenerator` (with `allocationSize = 50`), it is critical to sync the sequence correctly to avoid "Duplicate Key" exceptions.
+This is a classic performance bottleneck in Hibernate 6 (Spring Boot 3.x) when dealing with **JSONB** and **Dirty Checking**. You saved 60ms by removing the "Select," but now you are losing 30ms on a "Double Write" (Insert + Update).
 
-Here is the SQL script to synchronize your sequence with the existing data.
+### Why this is happening (The Architect's Diagnosis)
 
-### 1. The Sync Script
-This script finds the maximum ID currently in your table and sets the sequence to that value.
+The culprit is a combination of **`@DynamicUpdate`** and how Hibernate handles **Mutable Collections (Maps)** with JSON.
 
-```sql
--- Sync the sequence with the maximum ID in the table
-SELECT setval('issuer_fetch_response_id_seq', COALESCE((SELECT MAX(id) FROM issuer_fetch_response), 1), true);
+1.  **The "Dirty" Map:** You initialized your maps like this: `private Map<String, Object> nbblrespjson = new HashMap<>();`. 
+2.  **The Lifecycle:** When you call `save()`, Hibernate executes the `INSERT`. However, because you are using `@JdbcTypeCode(SqlTypes.JSON)`, Hibernate replaces your `HashMap` with its own `PersistentMapWrapper` to track changes. 
+3.  **The False Trigger:** Hibernate often perceives this "wrapper replacement" or the initialization of the Map as a **change (a "dirty" state)**. 
+4.  **The Double Write:** Because `@DynamicUpdate` is enabled, Hibernate says: *"Wait, I just inserted this, but I see these JSON maps are 'dirty' (changed). I must sync the database immediately."* So it issues an `UPDATE` right after the `INSERT`.
+
+---
+
+### How to Fix this Issue
+
+To get down to **one single DB call**, follow these three steps:
+
+#### 1. Remove `@DynamicUpdate`
+In high-traffic payment systems, `@DynamicUpdate` is actually a **performance anti-pattern**.
+*   **Why:** To use `@DynamicUpdate`, Hibernate must keep a "snapshot" of the entity in memory and perform a field-by-field comparison (Dirty Checking) to see what changed. This consumes **CPU** and **Memory**.
+*   **The Result:** Removing it tells Hibernate to just generate a static `UPDATE` or `INSERT` for all columns, which is much faster for the application tier.
+
+#### 2. Stop Initializing Maps in the Entity
+Instead of initializing with `new HashMap<>()`, leave them as `null` or handle initialization in the Business/Service layer. When Hibernate sees a `null` or a Map passed from the service, it won't trigger the "initialization-as-a-change" logic.
+
+#### 3. Optimize the `@JdbcTypeCode`
+Ensure Hibernate knows the JSON is not being modified immediately after insert.
+
+---
+
+### The Optimized Entity Class
+
+```java
+@Entity
+@Table(name="issuer_fetch_response")
+@Data
+// 1. REMOVED @DynamicUpdate - It's causing the extra dirty-check CPU overhead
+public class IssuerFetchResponseTable extends BaseEntity implements Serializable {
+    private static final long serialVersionUID = 1L;
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "issuer_fetch_response_id_seq")
+    @SequenceGenerator(
+            name = "issuer_fetch_response_id_seq",
+            sequenceName = "issuer_fetch_response_id_seq",
+            allocationSize = 50
+    )
+    private Long id;
+
+    @Column(name = "ref_id")
+    private String referenceId;
+    
+    @Column(name = "initiation_mode")
+    private String initiationMode;
+
+    // 2. REMOVED "= new HashMap<>()" 
+    // This prevents Hibernate from thinking the map was "replaced" during persistence
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "nbblrespjson", columnDefinition = "jsonb")
+    private Map<String, Object> nbblrespjson;
+
+    private String respSuccessUrl;
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "respamountrespjson", columnDefinition = "jsonb")
+    private Map<String, Object> respamountrespjson;
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "acknbblrespjsno", columnDefinition = "jsonb")
+    private Map<String, Object> acknbblrespjsno;
+
+    ...
+}
 ```
 
-**Explanation:**
-*   `MAX(id)`: Finds the highest existing ID.
-*   `COALESCE(..., 1)`: If the table is brand new (empty), it starts the sequence at 1.
-*   `true`: This tells the database that the value being set has already been "used," so the **next** call to `nextval()` will return `MAX(id) + 50` (since your increment is 50).
+---
 
+### Additional Performance Check: `BaseEntity`
+
+Check your `BaseEntity`. If you are using `@UpdateTimestamp` or an `@PrePersist` / `@PreUpdate` method that sets `updated_at`:
+
+*   **Problem:** If Hibernate sets the `INSERT` value for `updated_at` and then your Java code (or an interceptor) changes it by even 1 millisecond, Hibernate will trigger an `UPDATE`.
+*   **Fix:** Ensure `updated_at` is set **once** in the `BaseEntity` during the `@PrePersist` phase and not modified again during the same transaction.
+
+### Summary of Gains:
+1.  **Removed Select:** Saved 60ms.
+2.  **Removed Extra Update:** Saved 30ms.
+3.  **Removed `@DynamicUpdate`:** Reduced Application CPU usage (less dirty-checking).
+4.  **Final Result:** **1 DB Call (Insert only). Total time saved: ~90ms per transaction.**
+
+In a payment gateway handling thousands of transactions, **90ms per call** is a massive optimization that will significantly increase your TPS (Transactions Per Second).
 ---
 
 ### 2. Critical Step: If you just added the `id` column
