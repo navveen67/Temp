@@ -1,91 +1,49 @@
-Java 21 **Records** are a perfect fit for your "Payment Factory" because they are **immutable by design**. 
+Understood. We will keep the names exactly as **`Device`** and **`Tag`**, and move them into a shared package so they can be reused across your entire project without duplication.
 
-Since your JSON data (like Device and Tags) is usually "Audit data" (it doesn't change after it is created), making them Records tells Hibernate: *"This data is constant."* This is what stops that extra `UPDATE` query.
+This approach gives you **Mutability** (to change the mobile number) and **High Performance** (1 Insert only).
 
-Here is how you implement them.
-
-### 1. What is a Record file?
-A record is just a `.java` file, exactly like a class. However, instead of `public class`, you write `public record`.
-
-*   **No Boilerplate:** You don't need `@Data`, `@Getter`, `@AllArgsConstructor`, or `@NoArgsConstructor`. Java generates everything for you automatically.
-*   **Immutable:** All fields are automatically `final`.
-
----
-
-### 2. The Recommended Design (Separate Files)
-
-For a clean architecture, I recommend creating these as separate files. This makes them reusable across different services.
+### 1. Create the Shared DTOs
+Create these as standalone classes in a common package (e.g., `com.hdfc.amps.dto`).
 
 **Tag.java**
 ```java
 package com.hdfc.amps.dto;
 
-import jakarta.validation.constraints.NotBlank;
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.NoArgsConstructor;
 
-/**
- * Java 21 Record for Tag.
- * Hibernate & Jackson handle this automatically.
- */
-public record Tag(
-    String name, 
-    String value
-) {}
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+public class Tag {
+    private String name;
+    private String value;
+}
 ```
 
 **Device.java**
 ```java
 package com.hdfc.amps.dto;
 
-import jakarta.validation.constraints.NotBlank;
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.NoArgsConstructor;
 import java.util.List;
 
-/**
- * Java 21 Record for Device.
- * Notice: We use List instead of Array for better performance with Jackson.
- */
-public record Device(
-    @NotBlank(message = "Mobile Number is mandatory")
-    String mobile,
-    
-    List<Tag> tag // List is better than Tag[] for immutability
-) {}
-```
-
----
-
-### 3. Alternative: Keeping them as Nested Records
-If you prefer to keep them inside your `ReqFetchTxnDetails` class (like your current code), you can do that too. Records are **implicitly static** when defined inside a class.
-
-**ReqFetchTxnDetails.java**
-```java
 @Data
-public class ReqFetchTxnDetails implements HasCustomerId {
-    
-    private String customerId;
-    private String ts;
-    private String initMode;
-    private Device device; // Reference to the record below
-
-    // Nested Record 1
-    public record Device(
-        @NotBlank(message = "Mobile Number is mandatory")
-        String mobile,
-        List<Tag> tag
-    ) {}
-
-    // Nested Record 2
-    public record Tag(
-        String name,
-        String value
-    ) {}
+@NoArgsConstructor
+@AllArgsConstructor
+public class Device {
+    private String mobile;
+    private List<Tag> tag; // Keeping name as "tag" per your requirement
 }
 ```
 
 ---
 
-### 4. Updating the Entity (The Performance Link)
-
-Now, in your **Entity class**, you use the Record. Because a Record is immutable, Hibernate 6.5 knows it doesn't need to track changes inside the `device` object.
+### 2. The Optimized Entity
+In your Entity, you reference these shared classes. By using **`updatable = false`**, you tell Hibernate 6.5 to ignore these fields after the initial `INSERT`. This is what prevents the 30ms "Double Write" update.
 
 ```java
 @Entity
@@ -94,188 +52,63 @@ Now, in your **Entity class**, you use the Record. Because a Record is immutable
 public class IssuerFetchRequestTable {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "seq")
+    @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "req_seq")
+    @SequenceGenerator(name = "req_seq", sequenceName = "req_seq", allocationSize = 50)
     private Long id;
 
-    @JdbcTypeCode(SqlTypes.JSON)
-    @Column(name = "device", columnDefinition = "jsonb", updatable = false)
-    private ReqFetchTxnDetails.Device device; // Using the Record here
-}
-```
+    @Column(name = "ref_id")
+    private String referenceId;
 
----
-
-### 5. Why this is the "Master Class" move:
-
-1.  **Thread Safety:** Records are thread-safe. In Java 21, when using **Virtual Threads**, immutable objects reduce contention and memory synchronization overhead.
-2.  **No "Dirty" Collections:** When you use `Tag[]` or `ArrayList`, Hibernate has to check if you added or removed a tag. When you use a Record with a `List`, Hibernate treats the whole `Device` as one single "Value."
-3.  **Memory Footprint:** Records are much lighter on the Heap memory than classes with `@Data` because they don't have hidden "state" fields.
-4.  **Validation:** You can still put `@NotBlank` directly on the record components (as shown in my code above). Spring Validation will still work perfectly.
-
-### Important Note on Lists in Records:
-Inside a Record, use `List<Tag>` instead of `Tag[]`. 
-*   Arrays (`Tag[]`) are actually mutable in Java (you can change an element at `index[0]`).
-*   `List<Tag>` (especially if you use `List.of()`) is much more aligned with the "Immutable" philosophy of Records and is faster for Jackson to serialize.
-
-### How to use it in code:
-Creating a record is very easy:
-```java
-// Old way
-Device d = new Device();
-d.setMobile("9999999999");
-
-// Record way (Constructor is built-in)
-var device = new ReqFetchTxnDetails.Device("9999999999", List.of(new Tag("OS", "Android")));
-```
-
-**Your Task for the Team:**
-Tell your developers: *"We are moving all JSON-mapped DTOs to Java 21 Records. This ensures data integrity and prevents Hibernate from issuing unnecessary UPDATE queries on our audit tables."*
-
-
-
-#### 1. The Optimized Entity
-```java
-@Entity
-@Table(name = "issuer_fetch_request")
-@Data
-public class IssuerFetchRequestTable {
-
-    @Id
-    @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "seq_gen")
-    private Long id;
-
-    // PERFORMANCE HACK: updatable = false
-    // This PREVENTS the second UPDATE query entirely.
-    // Hibernate only includes this in the INSERT statement.
+    // PERFORMANCE KEY: updatable = false
+    // This allows you to use a mutable POJO but prevents the second UPDATE query.
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "device", columnDefinition = "jsonb", updatable = false)
     private Device device; 
-
-    // Same for other JSON columns that don't change after creation
-    @JdbcTypeCode(SqlTypes.JSON)
-    @Column(name = "payload", columnDefinition = "jsonb", updatable = false)
-    private PaymentPayload payload;
 }
 ```
 
 ---
 
-### 2. Why this is the "Best" Approach
-
-| Feature | Manual String + JsonUtil | POJO + `updatable=false` |
-| :--- | :--- | :--- |
-| **DB Calls** | 1 (Insert Only) | **1 (Insert Only)** |
-| **Developer Speed** | Low (Manual conversion) | **High (Direct Object use)** |
-| **Dirty Checking** | Happens (on String) | **Skipped (Hibernate ignores it)** |
-| **CPU Usage** | Manual Serialization | **Internal Optimized Serialization** |
-| **Refactoring** | Hard (String is opaque) | **Easy (Type-safe POJO)** |
-
----
-
-### 3. Taking it to the "Ultimate" Level: Java 21 Records
-
-Since you are using **Java 21**, you should make your `Device` class a **Java Record**. 
-
-**Why?** Records are immutable by design. Hibernate 6 is optimized for Records. When Hibernate sees a Record, it knows the data *cannot* change internally.
+### 3. Usage in your Payment Flow
+Now you can modify the data freely before saving, and it will still be a single, fast database call.
 
 ```java
-// Device as a Record (Java 21)
-public record Device(
-    String mobile,
-    List<Tag> tag
-) {}
-
-public record Tag(String name, String value) {}
-```
-
-#### Combined with the Entity:
-```java
-@JdbcTypeCode(SqlTypes.JSON)
-@Column(name = "device", updatable = false)
-private Device device; // This is now a Java 21 Record
+public void handlePayment(ReqFetchTxnDetails req) {
+    // 1. Get the shared DTO from the request
+    Device device = req.getDevice();
+    
+    // 2. You can now change values (Mutability requirement)
+    device.setMobile("MASKED_99999"); 
+    
+    // 3. Save the entity
+    IssuerFetchRequestTable entity = new IssuerFetchRequestTable();
+    entity.setDevice(device);
+    
+    // Hibernate executes exactly 1 INSERT and 0 UPDATEs.
+    repository.save(entity);
+}
 ```
 
 ---
 
-### 4. The "Data Wrapper" Decision
+### Why this is the perfect balance for your "Payment Factory":
 
-**My Architectural Advice:** 
-**Remove the `{"data": ...}` wrapper.** 
+1.  **Strict Naming:** We kept the names `Device` and `Tag` exactly as you requested.
+2.  **No Code Duplication:** By moving them out of the "Nested" structure into a shared package, all 5 of your APIs can use the same `Device` class.
+3.  **Mutable Business Logic:** You can mask, enrich, or change any value in the `Device` object before calling `save()`.
+4.  **Architectural Speed:** 
+    *   **Approach 1:** Using `Long id` + `Sequence` eliminates the **Select** call.
+    *   **Approach 2:** Using `updatable = false` eliminates the **Update** call.
+    *   **Final Result:** A pure, single-query Insert.
 
-If you flatten the JSON, your database `jsonb` indexing becomes much more powerful. 
-*   **With Wrapper:** To find a mobile number in SQL, you have to query: `where device->'data'->>'mobile' = '...'`
-*   **Without Wrapper:** You query: `where device->>'mobile' = '...'`
+### Task for your Developers:
+*"We are centralizing `Device` and `Tag` into a shared DTO package. For all entities, map these JSON columns using `@JdbcTypeCode(SqlTypes.JSON)` and set `updatable = false`. This ensures we maintain our performance benchmark of one single DB trip per record."*
 
-**Performance Gain:** The DB engine has to do one less "lookup" per row. Over millions of rows, this makes a massive difference in your reconciliation and reporting queries.
+This is a clean, professional, and extremely fast design. **Good luck with your team meeting today!**
 
----
 
-### Summary Checklist for your Team:
 
-1.  **Flatten the Structure:** Remove the `data` key. Save the POJO directly.
-2.  **Use Java 21 Records:** Make your DTOs (Device, Tag, etc.) Records.
-3.  **Apply `updatable = false`:** This is the most important part. It kills the "Double Write" problem forever.
-4.  **Use `jsonb`:** Ensure the column type in Postgres is `jsonb` (binary) for faster storage and indexing.
-
-**Final Result:**
-You get **clean, object-oriented code** for your developers, and your Dynatrace/Database logs will show **exactly 1 Insert query** per transaction. This is the highest level of optimization you can achieve for this specific problem.        public String getValue() { return value; }
-        public void setValue(String value) { this.value = value; }
-
-        @Override
-        public String toString() { return "Tag{name='" + name + "', value='" + value + "'}"; }
-    }
-
-    public static class AmountBreakUp {
-        private List<Tag> tags;
-        public void setTags(List<Tag> tags) { this.tags = tags; }
-        public List<Tag> getTags() { return tags; }
-    }
-
-    public static class Amount {
-        private AmountBreakUp amountBreakUp;
-        public void setAmountBreakUp(AmountBreakUp ab) { this.amountBreakUp = ab; }
-        public AmountBreakUp getAmountBreakUp() { return amountBreakUp; }
-    }
-
-    // --- 2. THE UTILITY ---
-    public static class JsonUtil {
-        private static final ObjectMapper mapper = new ObjectMapper()
-                .registerModule(new JavaTimeModule())
-                .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
-
-        public static <T> T fromJson(String json, TypeReference<T> type) {
-            try {
-                return (json != null && !json.isEmpty()) ? mapper.readValue(json, type) : null;
-            } catch (Exception e) {
-                System.err.println("Deserialization Error: " + e.getMessage());
-                return null;
-            }
-        }
-    }
-
-    public static void main(String[] args) {
-        // --- 3. HARDCODED DB STRING LITERAL ---
-        // This simulates the 'data' wrapper created by your mapper
-        String jsonStr = "{\"data\": {" +
-                            "\"T1\": {\"name\": \"GST\", \"value\": \"18%\"}," +
-                            "\"T2\": {\"name\": \"Processing Fee\", \"value\": \"10.00\"}" +
-                         "}}";
-
-        System.out.println("Input JSON: " + jsonStr);
-
-        // --- 4. YOUR SNIPPET LOGIC ---
-        Amount amount = new Amount();
-        AmountBreakUp amountBreakUp = new AmountBreakUp();
-        String TABLE_JSON_DATA = "data"; // Matching your constant
-
-        // Define the TypeReference
-        TypeReference<Map<String, Map<String, Tag>>> typeRef = new TypeReference<>() {};
-
-        if (jsonStr != null && !jsonStr.isEmpty()) {
-            // Perform Deserialization
-            Map<String, Map<String, Tag>> rootMap = JsonUtil.fromJson(jsonStr, typeRef);
-
-            if (rootMap != null && rootMap.containsKey(TABLE_JSON_DATA)) {
+) {
                 Map<String, Tag> tagMap = rootMap.get(TABLE_JSON_DATA);
 
                 if (tagMap != null) {
