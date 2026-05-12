@@ -1,26 +1,103 @@
-Here is the updated standalone test code. I have hardcoded the JSON string literal to match exactly what your database stores, allowing you to verify the deserialization logic in isolation.
+You have hit the exact "sweet spot" of Hibernate performance tuning. Your observation is 100% correct: **If Hibernate thinks an object is mutable, its dirty-checking engine will trigger that second `UPDATE` query.**
 
-### Standalone Deserialization Test
+In a payment factory, where 99% of your data is **"Write-Once" (Audit/Transaction details)**, you can exploit this to get the best of both worlds: the convenience of a POJO and the speed of a single `INSERT`.
+
+Here is the **Master Architect's Approach** to achieve peak performance.
+
+---
+
+### The Strategy: The "Immutable POJO" Pattern
+
+To use a `Device` class instead of a `String` while ensuring **exactly one `INSERT` and zero `UPDATEs`**, we use the `updatable = false` attribute. 
+
+When you set `updatable = false`, you are telling Hibernate's Dirty-Checking Engine: **"Ignore this field during flushes. Even if the object inside changes, do not ever generate an UPDATE statement for this column."**
+
+#### 1. The Optimized Entity
+```java
+@Entity
+@Table(name = "issuer_fetch_request")
+@Data
+public class IssuerFetchRequestTable {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "seq_gen")
+    private Long id;
+
+    // PERFORMANCE HACK: updatable = false
+    // This PREVENTS the second UPDATE query entirely.
+    // Hibernate only includes this in the INSERT statement.
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "device", columnDefinition = "jsonb", updatable = false)
+    private Device device; 
+
+    // Same for other JSON columns that don't change after creation
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "payload", columnDefinition = "jsonb", updatable = false)
+    private PaymentPayload payload;
+}
+```
+
+---
+
+### 2. Why this is the "Best" Approach
+
+| Feature | Manual String + JsonUtil | POJO + `updatable=false` |
+| :--- | :--- | :--- |
+| **DB Calls** | 1 (Insert Only) | **1 (Insert Only)** |
+| **Developer Speed** | Low (Manual conversion) | **High (Direct Object use)** |
+| **Dirty Checking** | Happens (on String) | **Skipped (Hibernate ignores it)** |
+| **CPU Usage** | Manual Serialization | **Internal Optimized Serialization** |
+| **Refactoring** | Hard (String is opaque) | **Easy (Type-safe POJO)** |
+
+---
+
+### 3. Taking it to the "Ultimate" Level: Java 21 Records
+
+Since you are using **Java 21**, you should make your `Device` class a **Java Record**. 
+
+**Why?** Records are immutable by design. Hibernate 6 is optimized for Records. When Hibernate sees a Record, it knows the data *cannot* change internally.
 
 ```java
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.DeserializationFeature;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+// Device as a Record (Java 21)
+public record Device(
+    String mobile,
+    List<Tag> tag
+) {}
 
-import java.util.*;
+public record Tag(String name, String value) {}
+```
 
-public class DeserializationTest {
+#### Combined with the Entity:
+```java
+@JdbcTypeCode(SqlTypes.JSON)
+@Column(name = "device", updatable = false)
+private Device device; // This is now a Java 21 Record
+```
 
-    // --- 1. THE DATA STRUCTURES (DTOs) ---
-    public static class Tag {
-        private String name;
-        private String value;
+---
 
-        // Getters and Setters are required for Jackson
-        public String getName() { return name; }
-        public void setName(String name) { this.name = name; }
-        public String getValue() { return value; }
+### 4. The "Data Wrapper" Decision
+
+**My Architectural Advice:** 
+**Remove the `{"data": ...}` wrapper.** 
+
+If you flatten the JSON, your database `jsonb` indexing becomes much more powerful. 
+*   **With Wrapper:** To find a mobile number in SQL, you have to query: `where device->'data'->>'mobile' = '...'`
+*   **Without Wrapper:** You query: `where device->>'mobile' = '...'`
+
+**Performance Gain:** The DB engine has to do one less "lookup" per row. Over millions of rows, this makes a massive difference in your reconciliation and reporting queries.
+
+---
+
+### Summary Checklist for your Team:
+
+1.  **Flatten the Structure:** Remove the `data` key. Save the POJO directly.
+2.  **Use Java 21 Records:** Make your DTOs (Device, Tag, etc.) Records.
+3.  **Apply `updatable = false`:** This is the most important part. It kills the "Double Write" problem forever.
+4.  **Use `jsonb`:** Ensure the column type in Postgres is `jsonb` (binary) for faster storage and indexing.
+
+**Final Result:**
+You get **clean, object-oriented code** for your developers, and your Dynatrace/Database logs will show **exactly 1 Insert query** per transaction. This is the highest level of optimization you can achieve for this specific problem.        public String getValue() { return value; }
         public void setValue(String value) { this.value = value; }
 
         @Override
