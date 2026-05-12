@@ -1,16 +1,82 @@
-I understand. When you have "Bad Coding Practices" (like duplicate nested classes) and the system is brittle, a major refactoring can break everything. In a high-pressure payment project, **unblocking the testing team is Priority #1.**
 
-The error is happening because even though the classes **look** the same, Java treats `ReqFetchTxnDetails.Tag` and `PayRequestTransaction.Tag` as completely different types. You cannot directly set one array to the other.
+To keep your main business logic clean and unblock the testers immediately, here is a dedicated **Mapper Utility** method. You can place this inside a helper class or at the bottom of your current Service class.
 
-Here is the **"Emergency Mapping Code"** to fix the error and unblock your team immediately.
-
-### The Fix: Manual Mapping Logic
-
-Replace your failing code with this. This manually transforms the source device/tags into the destination device/tags.
+### 1. The Mapper Method
 
 ```java
-// 1. Extract source device from JSON safely
-// Use our JsonUtil to navigate the "data" wrapper we discussed
+/**
+ * Emergency Bridge Mapper to handle incompatible nested classes.
+ * Maps ReqFetchTxnDetails.Device -> PayRequestTransaction.Device
+ */
+private PayRequestTransaction.Device mapToPayRequestDevice(ReqFetchTxnDetails.Device source) {
+    if (source == null) {
+        return null;
+    }
+
+    // Initialize Target Device
+    PayRequestTransaction.Device target = new PayRequestTransaction.Device();
+    target.setMobile(source.getMobile());
+
+    // Map Tag Array (Handling Type Mismatch)
+    if (source.getTag() != null) {
+        ReqFetchTxnDetails.Tag[] sourceTags = source.getTag();
+        PayRequestTransaction.Tag[] targetTags = new PayRequestTransaction.Tag[sourceTags.length];
+
+        for (int i = 0; i < sourceTags.length; i++) {
+            PayRequestTransaction.Tag tTag = new PayRequestTransaction.Tag();
+            tTag.setName(sourceTags[i].getName());
+            tTag.setValue(sourceTags[i].getValue());
+            targetTags[i] = tTag;
+        }
+        target.setTag(targetTags);
+    }
+
+    return target;
+}
+```
+
+---
+
+### 2. How to use it in your flow
+
+Now your main logic becomes very simple and easy to read for the testing team:
+
+```java
+// 1. Fetch data from the DB JSON field using our high-performance utility
+ReqFetchTxnDetails.Device sourceDevice = JsonUtil.getData(
+    issuerFetchRequestTable.getDevice(), 
+    ReqFetchTxnDetails.Device.class
+);
+
+// 2. Map to the PayRequest model using the bridge method
+PayRequestTransaction.Device targetDevice = mapToPayRequestDevice(sourceDevice);
+
+// 3. Downstream logic
+if (targetDevice != null) {
+    payerDeviceTagHelper.populateDeviceMandatoryFields(
+        targetDevice, 
+        Arrays.asList(targetDevice.getTag()), 
+        phoneNumber, 
+        referenceId
+    );
+    
+    payRequestTransaction.setDevice(targetDevice);
+}
+```
+
+---
+
+### Why this is the best move for today:
+1.  **Strict Isolation:** The "ugly" logic of looping through arrays is hidden inside the `mapToPayRequestDevice` method.
+2.  **No More Compiler Errors:** By creating new objects of the correct type (`PayRequestTransaction.Tag`), you satisfy the Java Type System.
+3.  **Fast Rollback:** If the testers find an issue, you only have to change this one method.
+4.  **Zero Dependency Change:** You aren't changing the `ReqFetchTxnDetails` or `PayRequestTransaction` classes, which prevents side effects in other parts of the project.
+
+**Deployment Tip:** Double-check the imports for `PayRequestTransaction` and `ReqFetchTxnDetails` at the top of your file to ensure you are referencing the correct nested classes. 
+
+**Go ahead and push this—it will unblock your team instantly!**
+
+
 ReqFetchTxnDetails.Device sourceDevice = JsonUtil.getData(issuerFetchRequestTable.getDevice(), ReqFetchTxnDetails.Device.class);
 
 if (sourceDevice != null) {
