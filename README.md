@@ -1,16 +1,137 @@
-You have hit the exact "sweet spot" of Hibernate performance tuning. Your observation is 100% correct: **If Hibernate thinks an object is mutable, its dirty-checking engine will trigger that second `UPDATE` query.**
+Java 21 **Records** are a perfect fit for your "Payment Factory" because they are **immutable by design**. 
 
-In a payment factory, where 99% of your data is **"Write-Once" (Audit/Transaction details)**, you can exploit this to get the best of both worlds: the convenience of a POJO and the speed of a single `INSERT`.
+Since your JSON data (like Device and Tags) is usually "Audit data" (it doesn't change after it is created), making them Records tells Hibernate: *"This data is constant."* This is what stops that extra `UPDATE` query.
 
-Here is the **Master Architect's Approach** to achieve peak performance.
+Here is how you implement them.
+
+### 1. What is a Record file?
+A record is just a `.java` file, exactly like a class. However, instead of `public class`, you write `public record`.
+
+*   **No Boilerplate:** You don't need `@Data`, `@Getter`, `@AllArgsConstructor`, or `@NoArgsConstructor`. Java generates everything for you automatically.
+*   **Immutable:** All fields are automatically `final`.
 
 ---
 
-### The Strategy: The "Immutable POJO" Pattern
+### 2. The Recommended Design (Separate Files)
 
-To use a `Device` class instead of a `String` while ensuring **exactly one `INSERT` and zero `UPDATEs`**, we use the `updatable = false` attribute. 
+For a clean architecture, I recommend creating these as separate files. This makes them reusable across different services.
 
-When you set `updatable = false`, you are telling Hibernate's Dirty-Checking Engine: **"Ignore this field during flushes. Even if the object inside changes, do not ever generate an UPDATE statement for this column."**
+**Tag.java**
+```java
+package com.hdfc.amps.dto;
+
+import jakarta.validation.constraints.NotBlank;
+
+/**
+ * Java 21 Record for Tag.
+ * Hibernate & Jackson handle this automatically.
+ */
+public record Tag(
+    String name, 
+    String value
+) {}
+```
+
+**Device.java**
+```java
+package com.hdfc.amps.dto;
+
+import jakarta.validation.constraints.NotBlank;
+import java.util.List;
+
+/**
+ * Java 21 Record for Device.
+ * Notice: We use List instead of Array for better performance with Jackson.
+ */
+public record Device(
+    @NotBlank(message = "Mobile Number is mandatory")
+    String mobile,
+    
+    List<Tag> tag // List is better than Tag[] for immutability
+) {}
+```
+
+---
+
+### 3. Alternative: Keeping them as Nested Records
+If you prefer to keep them inside your `ReqFetchTxnDetails` class (like your current code), you can do that too. Records are **implicitly static** when defined inside a class.
+
+**ReqFetchTxnDetails.java**
+```java
+@Data
+public class ReqFetchTxnDetails implements HasCustomerId {
+    
+    private String customerId;
+    private String ts;
+    private String initMode;
+    private Device device; // Reference to the record below
+
+    // Nested Record 1
+    public record Device(
+        @NotBlank(message = "Mobile Number is mandatory")
+        String mobile,
+        List<Tag> tag
+    ) {}
+
+    // Nested Record 2
+    public record Tag(
+        String name,
+        String value
+    ) {}
+}
+```
+
+---
+
+### 4. Updating the Entity (The Performance Link)
+
+Now, in your **Entity class**, you use the Record. Because a Record is immutable, Hibernate 6.5 knows it doesn't need to track changes inside the `device` object.
+
+```java
+@Entity
+@Table(name = "issuer_fetch_request")
+@Data
+public class IssuerFetchRequestTable {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "seq")
+    private Long id;
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "device", columnDefinition = "jsonb", updatable = false)
+    private ReqFetchTxnDetails.Device device; // Using the Record here
+}
+```
+
+---
+
+### 5. Why this is the "Master Class" move:
+
+1.  **Thread Safety:** Records are thread-safe. In Java 21, when using **Virtual Threads**, immutable objects reduce contention and memory synchronization overhead.
+2.  **No "Dirty" Collections:** When you use `Tag[]` or `ArrayList`, Hibernate has to check if you added or removed a tag. When you use a Record with a `List`, Hibernate treats the whole `Device` as one single "Value."
+3.  **Memory Footprint:** Records are much lighter on the Heap memory than classes with `@Data` because they don't have hidden "state" fields.
+4.  **Validation:** You can still put `@NotBlank` directly on the record components (as shown in my code above). Spring Validation will still work perfectly.
+
+### Important Note on Lists in Records:
+Inside a Record, use `List<Tag>` instead of `Tag[]`. 
+*   Arrays (`Tag[]`) are actually mutable in Java (you can change an element at `index[0]`).
+*   `List<Tag>` (especially if you use `List.of()`) is much more aligned with the "Immutable" philosophy of Records and is faster for Jackson to serialize.
+
+### How to use it in code:
+Creating a record is very easy:
+```java
+// Old way
+Device d = new Device();
+d.setMobile("9999999999");
+
+// Record way (Constructor is built-in)
+var device = new ReqFetchTxnDetails.Device("9999999999", List.of(new Tag("OS", "Android")));
+```
+
+**Your Task for the Team:**
+Tell your developers: *"We are moving all JSON-mapped DTOs to Java 21 Records. This ensures data integrity and prevents Hibernate from issuing unnecessary UPDATE queries on our audit tables."*
+
+
 
 #### 1. The Optimized Entity
 ```java
