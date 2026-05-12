@@ -1,118 +1,73 @@
-log.debug("Making request for ReferenceId {} to URL: {} with Method: {} and ID: {}", 
+To make your logs perfectly searchable using the **ReferenceId** and **URL** while keeping your "sentence-style" structure, we will prioritize the **ReferenceId** at the beginning of each sentence and move the **RequestId** to a secondary position.
+
+Here are the optimized versions of your loggers:
+
+### 1. Request Body Logger
+**Goal:** Connect the ReferenceId and the content immediately.
+
+```java
+log.debug("Request for ReferenceId {} with ID {} Body: {}", 
+    referenceId, 
+    requestId, 
+    SensitiveDataMasker.maskSensitiveJson(CommonUtils.convertObjectToJsonString(payload))
+);
+```
+
+### 2. Response Logger
+**Goal:** Track the status and body of a specific transaction instantly.
+*Note: I simplified the Status Code part slightly to keep the sentence clean.*
+
+```java
+log.debug("Response for ReferenceId {} with ID {} - Status Code = {}, Body = {}", 
+    referenceId, 
+    requestId, 
+    response.getStatusCode(), 
+    SensitiveDataMasker.maskSensitiveJson(CommonUtils.convertObjectToJsonString(response.getBody()))
+);
+```
+
+### 3. API Timing Logger
+**Goal:** Link the ReferenceId directly to the URL and the Time Taken for fast performance auditing.
+
+```java
+log.debug("Total time taken for ReferenceId {} and API {} with ID {}: Time = {}ms", 
     referenceId, 
     CommonUtils.validateForLogForging(url), 
-    method, 
-    requestId);
-
-
-
-}
-```
-
-#### Update the Abstract Layer (The "Smart" Way)
-We don't want `AbstractCacheOnlyManager` to have to deal with DB existence. So, we implement it only in the classes that have DB access.
-
-Modify `AbstractDbOnlyManager` and `AbstractCacheAsideManager`:
-
-```java
-public abstract class AbstractDbOnlyManager<E> extends AbstractBasePersistenceManager<E> {
-
-    // This is the "Hook" - the only thing the child class provides
-    protected abstract boolean dbExists(String refId); 
-
-    @Override
-    public boolean exists(String refId) {
-        logProcess("START", "EXISTS-CHECK", refId, "Querying DB");
-        try {
-            return dbExists(refId);
-        } catch (Exception e) {
-            logCriticalError("EXISTS-CHECK", refId, e);
-            return false; 
-        }
-    }
-    // ... other methods
-}
+    requestId, 
+    (System.currentTimeMillis() - startTime)
+);
 ```
 
 ---
 
-### 2. How to implement this in JPA without "Repeated Code"
+### Why this solves your search problem:
 
-In a real-world high-traffic system, you likely use **Spring Data JPA**. To make this work with minimal code in your implementation classes, you follow this pattern:
+1.  **"Anchored Search" Pattern:** In production logs (Splunk/ELK), you can now search for:
+    `"ReferenceId PHT02611" "URL: http://nbbl/pay"`
+    Because **ReferenceId** is now the first variable in almost every sentence, it acts as a "Primary Key" for your log files.
 
-#### The Concrete Implementation
-Instead of writing complex logic, your concrete class simply "plugs in" the Repository method.
+2.  **No Variable Interference:** Previously, your `requestId` was in the middle, acting like "noise." By moving it after the ReferenceId, you can search for the transaction flow without needing to know the internal Request ID.
 
-```java
-@Service
-public class PaymentOrderManager extends AbstractCacheAsideManager<PaymentOrder, PaymentOrderDto> {
-
-    @Autowired
-    private PaymentRepository repository; // Your JPA Repository
-
-    @Override
-    protected boolean dbExists(String refId) {
-        // One line of code! This satisfies the abstract requirement.
-        return repository.existsByReferenceId(refId); 
-    }
-
-    // ... mapToEntity, cacheRead, etc.
-}
-```
+3.  **Human Context:** These still read like natural sentences, which fits your project's coding standards, but they are architecturally structured for **Indexing**.
 
 ---
 
-### 3. Real-Time Problems & Architectural Solutions
+### Architect's Performance Tip for the Timing Logger:
 
-When you introduce `existsByRefId` in a high-traffic environment, you encounter three specific problems:
+Since you are using Java 21 and Spring Boot 3.4, `System.currentTimeMillis() - startTime` is fine, but for **High Precision** in a Payment Factory, consider using `System.nanoTime()` or the Spring **`StopWatch`** class.
 
-#### Problem A: The "Existence" Performance Trap
-**The Problem:** In JPA, `existsByRefId` is often implemented by Hibernate as `SELECT count(*) FROM table WHERE ref_id = ?`. On a table with 100 million rows, `COUNT(*)` is slower than `SELECT 1`.
-**The Architect's Fix:** Ensure your JPA Repository uses a custom query:
+**Optional "Master" timing code:**
 ```java
-@Query("SELECT CASE WHEN COUNT(p) > 0 THEN true ELSE false END FROM PaymentOrder p WHERE p.refId = :refId")
-boolean existsByReferenceId(@Param("refId") String refId);
+StopWatch watch = new StopWatch();
+watch.start();
+// ... API CALL ...
+watch.stop();
+
+log.debug("Total time taken for ReferenceId {} and API {} with ID {}: Time = {}ms", 
+    referenceId, url, requestId, watch.getTotalTimeMillis());
 ```
-Better yet, ensure there is a **Unique Index** on `ref_id`.
+*The `StopWatch` is cleaner and easier for your developers to use consistently across the 4,500-line file.*
 
-#### Problem B: The "Cache-Consistency" Problem
-**The Problem:** If you check `exists(refId)`, and it returns `false`, you might proceed to create a new record. But what if the record was *just* created 1ms ago and isn't in the DB index yet (Read-After-Write consistency)?
-**The Architect's Fix:** 
-If `exists` is for **Idempotency** (preventing double payments), you should not check the DB only. You should check the **Cache** first.
-
-Modified logic in `AbstractCacheAsideManager`:
-```java
-@Override
-public boolean exists(String refId) {
-    // 1. Check Cache first (High speed, avoids DB load)
-    if (cacheRead(refId) != null) return true; 
-
-    // 2. Check DB
-    return dbExists(refId);
-}
-```
-
-#### Problem C: The "Liskov Substitution" Violation
-**The Problem:** What happens to `AbstractCacheOnlyManager`? It doesn't have a DB. If someone calls `exists()`, what should it do?
-**The Architect's Fix:** In the `AbstractCacheOnlyManager`, you provide a default implementation:
-```java
-@Override
-public boolean exists(String refId) {
-    return cacheRead(refId) != null;
-}
-```
-
----
-
-### 4. Summary of the Design Pattern used here
-
-1.  **Template Method Pattern:** The Abstract class defines the `log -> try/catch -> execution` flow.
-2.  **Hook Method:** `dbExists()` is the hook. The concrete class provides the "glue" to the JPA repository.
-3.  **Fail-Fast Logging:** By putting the logging in the Abstract class, you guarantee that every `exists` check is logged properly without the developer having to remember to type `log.info`.
-
-### Why this is "Best-in-Class" for Payments:
-In payments, **RefId (Reference ID)** is usually the `External_Transaction_ID` from a provider like Stripe or Visa. 
-*   If your `exists(refId)` check is slow, your whole payment pipeline slows down.
-*   By using this framework, you can easily switch a specific manager from checking the DB to checking **Redis/Aerospike** just by changing which abstract class it extends, without touching the business logic.
-
-**Does this make sense? Would you like to see how we would handle "Idempotency" (preventing duplicate payments) specifically using this `exists` method?**
+### Summary for your Team Today:
+Give these patterns to your two developers as the **"Standard Logging Template."** Tell them:
+> *"Every log must start its variable sequence with ReferenceId, then URL (if applicable), then RequestID. This ensures we can search the entire lifecycle of a payment in one click."*
