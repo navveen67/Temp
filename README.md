@@ -1,52 +1,57 @@
-For a high-stakes payment gateway, naming is everything. You want a name that screams **"Validation Only"** so no developer ever confuses it with actual transaction data.
+The name is **technically very accurate**, as it describes exactly what it does (NBBL + Response Fetch + Callback + Trace). However, for a professional "Payment Factory" project, I suggest two small adjustments for readability and to fix the typo at the end:
 
-The best naming convention here is **"Request Trace"** or **"Validation Context."** It implies we are leaving a "trace" behind to verify the callback later.
+1.  **Fix the Typo:** Change `tracr` to `Trace`.
+2.  **Use PascalCase:** In Java, we capitalize the first letter of each word to make it readable (e.g., `NbblRespFetchCallbackTrace` instead of `Nbblrespfetchcallbacktracr`).
 
-### 1. The DTO: `NbblRequestTraceContext`
-This name clearly indicates that the object is a "Context" for "Tracing" a request.
+### Final Recommended Names:
+*   **DTO:** `NbblRespFetchCallbackTrace`
+*   **Manager:** `NbblRespFetchCallbackTraceManager`
+*   **Log Domain:** `NBBL-CALLBACK-TRACE`
 
+Here is the finalized code with your chosen naming convention:
+
+---
+
+### 1. The DTO: `NbblRespFetchCallbackTrace`
 ```java
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
 @Builder
-public class NbblRequestTraceContext implements Serializable {
+public class NbblRespFetchCallbackTrace implements Serializable {
     private static final long serialVersionUID = 1L;
 
     private String referenceId;
     
-    // Clearly named for Idempotency/Duplicate Check
+    // Set to true once the callback is successfully processed
     private boolean isProcessed; 
 
     private long requestTimestamp;
 }
 ```
 
-### 2. The Data Manager: `NbblRequestTraceDataManager`
-By naming it "Trace Data Manager," you distinguish it from your "Response Data Manager."
-
+### 2. The Data Manager: `NbblRespFetchCallbackTraceManager`
 ```java
 @Component
 @RequiredArgsConstructor
-public class NbblRequestTraceDataManager extends AbstractCacheOnlyManager<NbblRequestTraceContext> {
+public class NbblRespFetchCallbackTraceManager extends AbstractCacheOnlyManager<NbblRespFetchCallbackTrace> {
 
     private final AerospikeUtil aerospikeUtil;
     private final CacheTtlConfig ttlConfig;
 
     @Override
     protected String getDomain() {
-        // Understandable Logging Tag for Production Logs
+        // This will show up in your logs as: [NBBL-CALLBACK-TRACE]
         return "NBBL-CALLBACK-TRACE";
     }
 
     @Override
-    protected String getIdentifier(NbblRequestTraceContext e) {
+    protected String getIdentifier(NbblRespFetchCallbackTrace e) {
         return e.getReferenceId();
     }
 
     @Override
-    protected void cacheWrite(String id, NbblRequestTraceContext d) {
-        // Set this to 900 (15 minutes) in your config
+    protected void cacheWrite(String id, NbblRespFetchCallbackTrace d) {
         aerospikeUtil.addUpdateCache(
             AerospikeConstants.NBBL_CALLBACK_TRACE_CACHE, 
             id, 
@@ -56,11 +61,11 @@ public class NbblRequestTraceDataManager extends AbstractCacheOnlyManager<NbblRe
     }
 
     @Override
-    protected NbblRequestTraceContext cacheRead(String id) {
+    protected NbblRespFetchCallbackTrace cacheRead(String id) {
         return aerospikeUtil.getRecord(
             AerospikeConstants.NBBL_CALLBACK_TRACE_CACHE, 
             id, 
-            NbblRequestTraceContext.class
+            NbblRespFetchCallbackTrace.class
         );
     }
 }
@@ -68,61 +73,53 @@ public class NbblRequestTraceDataManager extends AbstractCacheOnlyManager<NbblRe
 
 ---
 
-### 3. Usage Pattern: Validation Flow
+### 3. Implementation Logic (Clean & Standardized)
 
-This logic ensures your "futureStep1" and "futureStep2" are handled in one go with very clear logging.
-
-#### When sending the Request (The "Trace" creation):
+#### Step A: When you trigger the `reqfetch` (Save the Trace)
 ```java
-public void initiateRequest(String refId) {
-    NbblRequestTraceContext trace = NbblRequestTraceContext.builder()
+public void initiateRespFetch(String refId) {
+    NbblRespFetchCallbackTrace trace = NbblRespFetchCallbackTrace.builder()
             .referenceId(refId)
             .isProcessed(false)
             .requestTimestamp(System.currentTimeMillis())
             .build();
             
-    traceDataManager.save(trace);
-    log.info("[NBBL-CALLBACK-TRACE][INIT] Trace created for RefId: {}", refId);
+    traceManager.save(trace);
+    log.info("[NBBL-CALLBACK-TRACE][INIT] Trace stored for RefId: {}", refId);
 }
 ```
 
-#### When receiving the Callback (The "Validation" check):
+#### Step B: When the Callback hits your API (Validate the Trace)
 ```java
-public void validateCallback(String refId) {
-    // 1. Fetch the Trace Context
-    NbblRequestTraceContext trace = traceDataManager.find(refId);
+public void handleNbblCallback(String refId) {
+    NbblRespFetchCallbackTrace trace = traceManager.find(refId);
 
-    // STEP 1: VALIDATE OWNERSHIP (Does it belong to us?)
+    // Check 1: Ownership Validation
     if (trace == null) {
-        log.error("[NBBL-CALLBACK-TRACE][REJECT] RefId {} not found. This request did not originate from this system.", refId);
-        throw new SecurityException("Unauthorized Reference ID");
+        log.error("[NBBL-CALLBACK-TRACE][REJECT] RefId {} not found in cache. Unauthorized or expired callback.", refId);
+        throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid Reference ID");
     }
 
-    // STEP 2: VALIDATE DUPLICATION (Has it been processed?)
+    // Check 2: Idempotency (Duplicate) Validation
     if (trace.isProcessed()) {
-        log.warn("[NBBL-CALLBACK-TRACE][DUPLICATE] RefId {} has already been processed. Ignoring duplicate callback.", refId);
-        return; // Exit to avoid double processing
+        log.warn("[NBBL-CALLBACK-TRACE][DUPLICATE] RefId {} already processed. Dropping duplicate callback.", refId);
+        return; 
     }
 
-    // SUCCESS: Proceed and Lock
+    // SUCCESS: Mark as processed and continue
     trace.setProcessed(true);
-    traceDataManager.save(trace);
+    traceManager.save(trace);
     
-    log.info("[NBBL-CALLBACK-TRACE][SUCCESS] RefId {} validated successfully. Proceeding to business logic.", refId);
+    log.info("[NBBL-CALLBACK-TRACE][SUCCESS] RefId {} validated. Processing transaction.", refId);
 }
 ```
 
 ---
 
-### Why these names work:
+### Why this is the "Best" for your project:
 
-1.  **Domain Tag (`NBBL-CALLBACK-TRACE`):** When you search your logs in Splunk or ELK, this tag will filter out all the noise and show you exactly the validation lifecycle.
-2.  **DTO Name (`NbblRequestTraceContext`):** No one will confuse "TraceContext" with "ResponseData." It sounds temporary, which fits the 15-minute TTL.
-3.  **Boolean Flag (`isProcessed`):** It is a standard industry term for idempotency checks. It clearly tells the developer: "The callback has already been handled."
+1.  **Explicitness:** No developer will ever mistake `NbblRespFetchCallbackTrace` for the actual response data payload. It is clearly a "Trace" of the callback.
+2.  **Auditability:** Your loggers will now clearly show `[NBBL-CALLBACK-TRACE][REJECT]` or `[SUCCESS]`, making it very easy for your support team to find out why a transaction was dropped.
+3.  **Clean Separation:** By using a dedicated DTO and Manager for this specific validation, you follow the **Single Responsibility Principle**, keeping your code clean and your 4,500-line file easier to manage.
 
-### Task for your developers:
-*   **Dev 1:** Update `AerospikeConstants` to include `NBBL_CALLBACK_TRACE_CACHE`.
-*   **Dev 2:** Update `CacheTtlConfig` with `nbblTraceTtl = 900`.
-*   **Both:** Implement the `NbblRequestTraceDataManager` to replace the manual `CompletableFuture` validation steps.
-
-This architecture is clean, highly performant, and easy for your production support team to monitor!
+**You can now confidently give this specific naming and implementation to your team!**
