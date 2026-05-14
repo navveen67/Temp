@@ -1,71 +1,99 @@
-As a Senior Architect, I have refactored your Feign Logging logic to match the "Correlation Standard." In a high-traffic payment system, the **ReferenceId** must be the first identifier in every log line to ensure that SRE and Support teams can trace a transaction's lifecycle across different microservices using a single Splunk/ELK query.
+As a Senior Architect, I agree with your logic. In a high-traffic environment, particularly with **GET** requests (which have no body) or **Large File Uploads**, forcing the URL and Body into the same log line causes issues.
 
-Here is the production-ready, standardized Feign Logger implementation.
+By splitting these into **three granular methods**, you achieve "Progressive Logging." If the connection fails *after* the URL is logged but *before* the body is sent, you still have the trace of where the request was going.
 
-### 1. Refactored Feign Logging Logic
+### The Standardized "Three-Point" Network Logger
 
-I have integrated the `ReferenceId` as the primary anchor for each log entry, maintaining your security standards for Log Forging and Data Masking.
+We will maintain the `[NETWORK-OUTBOUND]` anchor tag to keep the logs searchable.
 
 ```java
-// 1. Initial Request Logging
-log.info("Making Feign request for ReferenceId {} to URL: {} with Method: {} and ID: {}",
-    referenceId, 
-    CommonUtils.validateForLogForging(request.url()), 
-    request.httpMethod(), 
-    reqId);
+@Slf4j
+public class OutboundLoggerUtility {
 
-// 2. Request Body Logging (Debug level)
-log.debug("Request for ReferenceId {} with ID {} Body: {}", 
-    referenceId, 
-    reqId,
-    CommonUtils.validateForLogForging(SensitiveDataMasker.maskSensitiveJson(bodyText)));
+    private static final String TAG = "[NETWORK-OUTBOUND]";
 
-// 3. Detailed Response Logging (Status + Body)
-log.debug("Response for ReferenceId {} with ID {} - Status Code = {}, Body = {}",
-    referenceId,
-    reqId,
-    response.status(),
-    CommonUtils.validateForLogForging(maskedAndTruncatedBody));
+    /**
+     * 1. Log Request Metadata (URL, Method, Client)
+     * Level: INFO (Always logged for traceability)
+     */
+    public static void logRequestInitiation(String refId, String reqId, String clientType, String method, String url) {
+        log.info("{} [REF: {}][ID: {}] START | {} {} | Client: {}", 
+            TAG, refId, reqId, method, CommonUtils.validateForLogForging(url), clientType);
+    }
 
-// 4. Summary Response Logging (Status only - useful for large payloads or errors)
-log.debug("Response for ReferenceId {} with ID {} - Status Code = {}", 
-    referenceId, 
-    reqId, 
-    response.status());
+    /**
+     * 2. Log Request Payload
+     * Level: DEBUG (Masked for security)
+     */
+    public static void logRequestBody(String refId, String reqId, String body) {
+        if (log.isDebugEnabled() && body != null && !body.isEmpty()) {
+            log.debug("{} [REF: {}][ID: {}] REQ-BODY: {}", 
+                TAG, refId, reqId, 
+                CommonUtils.validateForLogForging(SensitiveDataMasker.maskSensitiveJson(body)));
+        }
+    }
 
-// 5. Performance/Timing Logging
-log.debug("Total time taken for ReferenceId {} and Feign API {} with ID {}: Time = {}ms",
-    referenceId,
-    CommonUtils.validateForLogForging(response.request().url()),
-    reqId,
-    duration);
+    /**
+     * 3. Log Response (Status, Duration, and Body)
+     * Level: INFO (Status/Time) | DEBUG (Body)
+     */
+    public static void logResponse(String refId, String reqId, int statusCode, String responseBody, long duration) {
+        // Log the summary at INFO level
+        log.info("{} [REF: {}][ID: {}] END | Status: {} | Time: {}ms", 
+            TAG, refId, reqId, statusCode, duration);
+
+        // Log the body at DEBUG level
+        if (log.isDebugEnabled() && responseBody != null && !responseBody.isEmpty()) {
+            log.debug("{} [REF: {}][ID: {}] RESP-BODY: {}", 
+                TAG, refId, reqId, 
+                CommonUtils.validateForLogForging(SensitiveDataMasker.maskSensitiveJson(responseBody)));
+        }
+    }
+}
 ```
 
 ---
 
-### 2. Architect's Implementation Strategy:
+### Why this "Three-Point" Strategy is Superior:
 
-Since Feign Loggers usually run in a generic context, you must ensure the `referenceId` is available within the logger scope.
-
-**Recommendation A: Using MDC (Standard Approach)**
-If you are using **MDC (Mapped Diagnostic Context)** to store your `referenceId` at the start of the transaction, you should fetch it like this inside your custom Feign Logger:
-
-```java
-String referenceId = org.slf4j.MDC.get("referenceId"); 
-// Default to "N/A" if missing to prevent null in logs
-referenceId = (referenceId != null) ? referenceId : "UNKNOWN";
-```
-
-**Recommendation B: ThreadLocal / Header**
-If you are passing the `referenceId` as a custom header in Feign, you can extract it from the `request.headers()` collection before logging.
+1.  **Handles GET vs POST naturally:** 
+    *   For a **GET** request, you simply call `logRequestInitiation` and `logResponse`. You skip the body method entirely. No "null" or "empty" junk in your logs.
+2.  **Failure Forensics:** 
+    *   If your external bank server hangs, your logs will show the `START` line, but won't show the `END` line. This tells you exactly where the "Black Hole" is.
+3.  **Log Forging Protection:** 
+    *   Every single method passes data through `validateForLogForging`, ensuring a malicious 3rd party cannot inject a newline `\n` into their response to write fake logs into your system.
+4.  **Performance & Cost:**
+    *   In a high-volume payment system, logging Request/Response bodies in **INFO** level is a major cost (Storage/Disk I/O). 
+    *   By putting the bodies in **DEBUG**, you can keep them OFF in production to save costs, but turn them ON for a specific `referenceId` during a production issue.
 
 ---
 
-### 3. Why this is the "Elite" Standard:
+### Example: Usage in Feign Client
 
-1.  **Uniform Traceability:** By putting `ReferenceId` at the start of the message, you make the logs "Greppable." You can run `grep "REF12345"` and see both your internal logic and your Feign network calls in exact chronological order.
-2.  **Security Compliance:** Using `CommonUtils.validateForLogForging` is critical in banking to prevent **Log Injection** attacks where a malicious payload attempts to write fake log entries.
-3.  **Data Privacy:** The `SensitiveDataMasker` ensures that PII (Personally Identifiable Information) like card numbers or OTPs are never written to the disk in plain text.
-4.  **Performance Visibility:** The "Total time taken" log is vital for detecting **latency creep** in 3rd party bank APIs (like NPCI or HDFC core).
+```java
+// Method: Request
+OutboundLoggerUtility.logRequestInitiation(refId, reqId, "FEIGN", "POST", request.url());
 
-**Architect's Note:** Ensure that your `log.info` and `log.debug` levels are correctly configured in your `logback-spring.xml` or OpenShift ConfigMap, so you don't overwhelm the disk with debug bodies in the production environment unless active troubleshooting is required.
+if(request.body() != null) {
+    OutboundLoggerUtility.logRequestBody(refId, reqId, request.body().toString());
+}
+
+// Method: Response
+OutboundLoggerUtility.logResponse(refId, reqId, response.status(), bodyText, duration);
+```
+
+### Example: Usage in WebClient
+
+```java
+// Initiation
+OutboundLoggerUtility.logRequestInitiation(refId, reqId, "WEBCLIENT", method, url);
+
+// Payload (Only if exists)
+OutboundLoggerUtility.logRequestBody(refId, reqId, jsonBody);
+
+// Response
+OutboundLoggerUtility.logResponse(refId, reqId, statusCode, responseBody, duration);
+```
+
+### Master's Architectural Verdict:
+This is the **"Final Form"** of network logging. It provides a chronological story of the network call. Any developer can search Splunk for `[NETWORK-OUTBOUND]` and immediately see the **Start -> Body -> End** lifecycle of every packet leaving your system. This is what we call **"High-Resolution Observability."**
