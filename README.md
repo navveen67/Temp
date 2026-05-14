@@ -1,10 +1,10 @@
-As a Senior Architect, I agree with your logic. In a high-traffic environment, particularly with **GET** requests (which have no body) or **Large File Uploads**, forcing the URL and Body into the same log line causes issues.
+As a Senior Architect, I understand the need for **Granular Forensic Logging**. By decoupling the **Response Metadata**, the **Response Payload**, and the **Performance Metrics**, we allow the system to log exactly what is available at each stage of the lifecycle.
 
-By splitting these into **three granular methods**, you achieve "Progressive Logging." If the connection fails *after* the URL is logged but *before* the body is sent, you still have the trace of where the request was going.
+This is especially useful if a connection is severed midway—you might get the performance timing but not a body, or a status code but the body is too large to log.
 
-### The Standardized "Three-Point" Network Logger
+### The Granular "Five-Point" Network Logger
 
-We will maintain the `[NETWORK-OUTBOUND]` anchor tag to keep the logs searchable.
+Here is the refined, production-ready utility with dedicated methods for maximum granularity.
 
 ```java
 @Slf4j
@@ -13,8 +13,7 @@ public class OutboundLoggerUtility {
     private static final String TAG = "[NETWORK-OUTBOUND]";
 
     /**
-     * 1. Log Request Metadata (URL, Method, Client)
-     * Level: INFO (Always logged for traceability)
+     * 1. Log Request Initiation (Metadata)
      */
     public static void logRequestInitiation(String refId, String reqId, String clientType, String method, String url) {
         log.info("{} [REF: {}][ID: {}] START | {} {} | Client: {}", 
@@ -22,8 +21,7 @@ public class OutboundLoggerUtility {
     }
 
     /**
-     * 2. Log Request Payload
-     * Level: DEBUG (Masked for security)
+     * 2. Log Request Payload (Separated)
      */
     public static void logRequestBody(String refId, String reqId, String body) {
         if (log.isDebugEnabled() && body != null && !body.isEmpty()) {
@@ -34,66 +32,79 @@ public class OutboundLoggerUtility {
     }
 
     /**
-     * 3. Log Response (Status, Duration, and Body)
-     * Level: INFO (Status/Time) | DEBUG (Body)
+     * 3. Log Response Status (Separated)
      */
-    public static void logResponse(String refId, String reqId, int statusCode, String responseBody, long duration) {
-        // Log the summary at INFO level
-        log.info("{} [REF: {}][ID: {}] END | Status: {} | Time: {}ms", 
-            TAG, refId, reqId, statusCode, duration);
+    public static void logResponseStatus(String refId, String reqId, int statusCode) {
+        log.info("{} [REF: {}][ID: {}] END | Status Code: {}", 
+            TAG, refId, reqId, statusCode);
+    }
 
-        // Log the body at DEBUG level
+    /**
+     * 4. Log Response Payload (Separated)
+     */
+    public static void logResponseBody(String refId, String reqId, String responseBody) {
         if (log.isDebugEnabled() && responseBody != null && !responseBody.isEmpty()) {
             log.debug("{} [REF: {}][ID: {}] RESP-BODY: {}", 
                 TAG, refId, reqId, 
                 CommonUtils.validateForLogForging(SensitiveDataMasker.maskSensitiveJson(responseBody)));
         }
     }
+
+    /**
+     * 5. Log Performance Metrics (Separated)
+     * Dedicated to: Performance Tuning & Profiling
+     */
+    public static void logPerformanceMetrics(String refId, String reqId, String url, long duration) {
+        log.info("{} Total time taken for ReferenceId {} and URL {} with ID {}: Time = {}ms",
+            TAG, refId, CommonUtils.validateForLogForging(url), reqId, duration);
+    }
 }
 ```
 
 ---
 
-### Why this "Three-Point" Strategy is Superior:
+### Why this "Five-Point" Granularity is Elite:
 
-1.  **Handles GET vs POST naturally:** 
-    *   For a **GET** request, you simply call `logRequestInitiation` and `logResponse`. You skip the body method entirely. No "null" or "empty" junk in your logs.
-2.  **Failure Forensics:** 
-    *   If your external bank server hangs, your logs will show the `START` line, but won't show the `END` line. This tells you exactly where the "Black Hole" is.
-3.  **Log Forging Protection:** 
-    *   Every single method passes data through `validateForLogForging`, ensuring a malicious 3rd party cannot inject a newline `\n` into their response to write fake logs into your system.
-4.  **Performance & Cost:**
-    *   In a high-volume payment system, logging Request/Response bodies in **INFO** level is a major cost (Storage/Disk I/O). 
-    *   By putting the bodies in **DEBUG**, you can keep them OFF in production to save costs, but turn them ON for a specific `referenceId` during a production issue.
+1.  **Debugging vs. Profiling:** 
+    *   If you only care about **latency**, you look for the `logPerformanceMetrics` line. 
+    *   If you are debugging a **data issue**, you look for `logResponseBody`. 
+    *   In a high-traffic environment, you can keep `INFO` level for status and timing, while keeping the heavy `DEBUG` bodies completely disabled until needed.
+2.  **Handling "Partial" Failures:** 
+    *   In a scenario where a 3rd party bank returns a `500 Internal Server Error` with **no body**, your code will still call `logResponseStatus`. The granular `logResponseBody` simply won't execute, keeping your logs clean of "null" or "empty" markers.
+3.  **Traceability:** 
+    *   By having a dedicated performance method, you can easily create **Splunk Alerts**. For example: "Alert me if `logPerformanceMetrics` for URL 'X' shows `Time > 5000ms`". This is much easier to parse than trying to extract a number from a long combined string.
+4.  **Async Friendly:** 
+    *   If you decide to log bodies asynchronously (to save main-thread time), having separate methods makes it easy to wrap only the "Body" methods in a background task while keeping the "Status" and "Timing" on the main thread for immediate visibility.
 
 ---
 
-### Example: Usage in Feign Client
+### Final Implementation Flow for your Service:
 
 ```java
-// Method: Request
-OutboundLoggerUtility.logRequestInitiation(refId, reqId, "FEIGN", "POST", request.url());
+long startTime = System.currentTimeMillis();
 
-if(request.body() != null) {
-    OutboundLoggerUtility.logRequestBody(refId, reqId, request.body().toString());
+// 1. Start Trace
+OutboundLoggerUtility.logRequestInitiation(refId, reqId, "FEIGN", "POST", url);
+
+// 2. Log Body (If exists)
+OutboundLoggerUtility.logRequestBody(refId, reqId, requestJson);
+
+try {
+    // ... Actual Network Execution ...
+    int status = response.status();
+    String body = response.body();
+
+    // 3. Log Status
+    OutboundLoggerUtility.logResponseStatus(refId, reqId, status);
+
+    // 4. Log Body
+    OutboundLoggerUtility.logResponseBody(refId, reqId, body);
+
+} finally {
+    // 5. Always log performance, even if an exception occurs
+    long duration = System.currentTimeMillis() - startTime;
+    OutboundLoggerUtility.logPerformanceMetrics(refId, reqId, url, duration);
 }
-
-// Method: Response
-OutboundLoggerUtility.logResponse(refId, reqId, response.status(), bodyText, duration);
 ```
 
-### Example: Usage in WebClient
-
-```java
-// Initiation
-OutboundLoggerUtility.logRequestInitiation(refId, reqId, "WEBCLIENT", method, url);
-
-// Payload (Only if exists)
-OutboundLoggerUtility.logRequestBody(refId, reqId, jsonBody);
-
-// Response
-OutboundLoggerUtility.logResponse(refId, reqId, statusCode, responseBody, duration);
-```
-
-### Master's Architectural Verdict:
-This is the **"Final Form"** of network logging. It provides a chronological story of the network call. Any developer can search Splunk for `[NETWORK-OUTBOUND]` and immediately see the **Start -> Body -> End** lifecycle of every packet leaving your system. This is what we call **"High-Resolution Observability."**
+**Architect's Verdict:** This is the most **Atomic** approach to logging. Each method has a **Single Responsibility**. This structure is highly robust and perfectly optimized for the **Performance Tuning** purpose you mentioned at the beginning of our session. You now have the ultimate observability tool for your payment system.
