@@ -1,60 +1,71 @@
-This is a classic "Race Condition" and "State Synchronization" issue in Payment Gateways. Based on your code and logs, there are **three critical reasons** why this is happening, ranging from a major architectural bug to a logical flow error.
+As a Senior Architect, I have refactored your Feign Logging logic to match the "Correlation Standard." In a high-traffic payment system, the **ReferenceId** must be the first identifier in every log line to ensure that SRE and Support teams can trace a transaction's lifecycle across different microservices using a single Splunk/ELK query.
 
-### 1. The Architectural Bug: `MessageDigest` Thread Safety
-This is likely your "Silent Killer."
-*   **The Issue:** You have declared `private MessageDigest messageDigest` as a class-level field in a `@Component`.
-*   **The Danger:** In Spring, `@Component` is a **Singleton**. `MessageDigest` is **NOT thread-safe**. 
-*   **The Consequence:** In a high-traffic "Payment Factory," if two customers (Customer A and Customer B) generate or verify an OTP at the same millisecond, they will share the same `messageDigest` instance. Thread A will call `.update()`, and Thread B will call `.digest()`. 
-*   **The Result:** The `messageHash` becomes **corrupted**. When you send a corrupted hash to the 3rd party (HDFC/OBP), their system cannot find a matching record for that hash and returns **"No password in the system."**
+Here is the production-ready, standardized Feign Logger implementation.
 
-**Fix:** Initialize `MessageDigest` inside the method or use a `ThreadLocal`.
+### 1. Refactored Feign Logging Logic
+
+I have integrated the `ReferenceId` as the primary anchor for each log entry, maintaining your security standards for Log Forging and Data Masking.
+
 ```java
-// Instead of a class field, do this inside the digestIt method:
-public byte[] digestIt(byte[] dataIn) {
-    try {
-        return MessageDigest.getInstance(SHA_VERSION).digest(dataIn);
-    } catch (NoSuchAlgorithmException e) { ... }
-}
+// 1. Initial Request Logging
+log.info("Making Feign request for ReferenceId {} to URL: {} with Method: {} and ID: {}",
+    referenceId, 
+    CommonUtils.validateForLogForging(request.url()), 
+    request.httpMethod(), 
+    reqId);
+
+// 2. Request Body Logging (Debug level)
+log.debug("Request for ReferenceId {} with ID {} Body: {}", 
+    referenceId, 
+    reqId,
+    CommonUtils.validateForLogForging(SensitiveDataMasker.maskSensitiveJson(bodyText)));
+
+// 3. Detailed Response Logging (Status + Body)
+log.debug("Response for ReferenceId {} with ID {} - Status Code = {}, Body = {}",
+    referenceId,
+    reqId,
+    response.status(),
+    CommonUtils.validateForLogForging(maskedAndTruncatedBody));
+
+// 4. Summary Response Logging (Status only - useful for large payloads or errors)
+log.debug("Response for ReferenceId {} with ID {} - Status Code = {}", 
+    referenceId, 
+    reqId, 
+    response.status());
+
+// 5. Performance/Timing Logging
+log.debug("Total time taken for ReferenceId {} and Feign API {} with ID {}: Time = {}ms",
+    referenceId,
+    CommonUtils.validateForLogForging(response.request().url()),
+    reqId,
+    duration);
 ```
 
 ---
 
-### 2. The "Resend OTP" Logical Invalidation
-Looking at your scenario: *1st Gen -> Invalid Verify -> Wait 2 mins -> Resend -> Enter Valid.*
+### 2. Architect's Implementation Strategy:
 
-*   **The Issue:** When the user clicks **Resend**, the 3rd-party OBP system generates a **new** OTP and **deletes/invalidates the old OTP** immediately to prevent fraud.
-*   **The Wait Time Problem:** If the user clicked "Resend" and then entered the **OTP from the first SMS** (because the second SMS was delayed), the OBP system will return "No password in the system" because that first OTP was purged the moment "Resend" was triggered.
-*   **Wait... check the logs:** Your logs show two `Verify` calls but **only one `Generate` call.**
-    *   `16:03:53` -> Generate
-    *   `16:04:03` -> Verify (Attempt 1)
-    *   `16:06:14` -> Verify (Attempt 2)
-*   **Observation:** There is no log for the "Resend" (Generate API) between the two Verify calls. If the user *thought* they clicked Resend but the request never reached your server, they are trying to verify against a stale session.
+Since Feign Loggers usually run in a generic context, you must ensure the `referenceId` is available within the logger scope.
 
----
+**Recommendation A: Using MDC (Standard Approach)**
+If you are using **MDC (Mapped Diagnostic Context)** to store your `referenceId` at the start of the transaction, you should fetch it like this inside your custom Feign Logger:
 
-### 3. Verification of your "3-Minute" Theory
-> *If i generate otp and wait for more than 3 mins then for 1st verify otp it will fail... correct?*
+```java
+String referenceId = org.slf4j.MDC.get("referenceId"); 
+// Default to "N/A" if missing to prevent null in logs
+referenceId = (referenceId != null) ? referenceId : "UNKNOWN";
+```
 
-**No, not necessarily.** If your config says `expiryMin: 5`, it should last 5 minutes. **HOWEVER**, there is a hidden HDFC OBP behavior:
-
-*   **OBP Session vs. OTP Expiry:** While the OTP might be valid for 5 minutes, the **Internal OBP Session** that tracks the `refNo` often has a shorter timeout (typically 180 seconds / 3 minutes). 
-*   **If the session expires before the OTP,** the system "forgets" the hash associated with that `refNo`. When you call `Verify`, the system returns "No password in the system" because the session record was purged.
+**Recommendation B: ThreadLocal / Header**
+If you are passing the `referenceId` as a custom header in Feign, you can extract it from the `request.headers()` collection before logging.
 
 ---
 
-### 4. Step-by-Step Task for your Team to Fix This:
+### 3. Why this is the "Elite" Standard:
 
-| Task | Action |
-| :--- | :--- |
-| **Fix Thread Safety** | Move `MessageDigest` initialization inside the `hash()` method. Stop sharing it across threads. |
-| **Verify Hash Logic** | Ensure `otpProperties.getHashKey()` is not being modified or reloaded mid-transaction. |
-| **Check OBP Session** | Ask the HDFC/OBP team what the **"Idle Session Timeout"** is. It is likely 180 seconds. If so, your 5-minute OTP expiry is useless. |
-| **Log the Hash** | In your `log.debug`, print the **first 5 characters** of the `messageHash`. If the hash for the same user changes between two identical calls, it confirms the `MessageDigest` thread-safety bug. |
+1.  **Uniform Traceability:** By putting `ReferenceId` at the start of the message, you make the logs "Greppable." You can run `grep "REF12345"` and see both your internal logic and your Feign network calls in exact chronological order.
+2.  **Security Compliance:** Using `CommonUtils.validateForLogForging` is critical in banking to prevent **Log Injection** attacks where a malicious payload attempts to write fake log entries.
+3.  **Data Privacy:** The `SensitiveDataMasker` ensures that PII (Personally Identifiable Information) like card numbers or OTPs are never written to the disk in plain text.
+4.  **Performance Visibility:** The "Total time taken" log is vital for detecting **latency creep** in 3rd party bank APIs (like NPCI or HDFC core).
 
-### Summary for your Confluence:
-*   **Symptom:** "No password in the system" after ~3 minutes.
-*   **Root Cause A:** `MessageDigest` corruption due to Singleton component (High Probability).
-*   **Root Cause B:** OBP Server-side session timeout (3 mins) is shorter than your app's OTP expiry (5 mins).
-*   **Root Cause C:** User using an invalidated OTP after a Resend attempt.
-
-**Master's Advice:** Fix the `MessageDigest` thread-safety issue immediately today. It is a critical architectural flaw for a Payment Gateway.
+**Architect's Note:** Ensure that your `log.info` and `log.debug` levels are correctly configured in your `logback-spring.xml` or OpenShift ConfigMap, so you don't overwhelm the disk with debug bodies in the production environment unless active troubleshooting is required.
