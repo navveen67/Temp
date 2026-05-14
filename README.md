@@ -1,110 +1,128 @@
-As a Senior Architect, I understand the need for **Granular Forensic Logging**. By decoupling the **Response Metadata**, the **Response Payload**, and the **Performance Metrics**, we allow the system to log exactly what is available at each stage of the lifecycle.
+For a high-stakes payment gateway, naming is everything. You want a name that screams **"Validation Only"** so no developer ever confuses it with actual transaction data.
 
-This is especially useful if a connection is severed midway—you might get the performance timing but not a body, or a status code but the body is too large to log.
+The best naming convention here is **"Request Trace"** or **"Validation Context."** It implies we are leaving a "trace" behind to verify the callback later.
 
-### The Granular "Five-Point" Network Logger
-
-Here is the refined, production-ready utility with dedicated methods for maximum granularity.
+### 1. The DTO: `NbblRequestTraceContext`
+This name clearly indicates that the object is a "Context" for "Tracing" a request.
 
 ```java
-@Slf4j
-public class OutboundLoggerUtility {
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class NbblRequestTraceContext implements Serializable {
+    private static final long serialVersionUID = 1L;
 
-    private static final String TAG = "[NETWORK-OUTBOUND]";
+    private String referenceId;
+    
+    // Clearly named for Idempotency/Duplicate Check
+    private boolean isProcessed; 
 
-    /**
-     * 1. Log Request Initiation (Metadata)
-     */
-    public static void logRequestInitiation(String refId, String reqId, String clientType, String method, String url) {
-        log.info("{} [REF: {}][ID: {}] START | {} {} | Client: {}", 
-            TAG, refId, reqId, method, CommonUtils.validateForLogForging(url), clientType);
+    private long requestTimestamp;
+}
+```
+
+### 2. The Data Manager: `NbblRequestTraceDataManager`
+By naming it "Trace Data Manager," you distinguish it from your "Response Data Manager."
+
+```java
+@Component
+@RequiredArgsConstructor
+public class NbblRequestTraceDataManager extends AbstractCacheOnlyManager<NbblRequestTraceContext> {
+
+    private final AerospikeUtil aerospikeUtil;
+    private final CacheTtlConfig ttlConfig;
+
+    @Override
+    protected String getDomain() {
+        // Understandable Logging Tag for Production Logs
+        return "NBBL-CALLBACK-TRACE";
     }
 
-    /**
-     * 2. Log Request Payload (Separated)
-     */
-    public static void logRequestBody(String refId, String reqId, String body) {
-        if (log.isDebugEnabled() && body != null && !body.isEmpty()) {
-            log.debug("{} [REF: {}][ID: {}] REQ-BODY: {}", 
-                TAG, refId, reqId, 
-                CommonUtils.validateForLogForging(SensitiveDataMasker.maskSensitiveJson(body)));
-        }
+    @Override
+    protected String getIdentifier(NbblRequestTraceContext e) {
+        return e.getReferenceId();
     }
 
-    /**
-     * 3. Log Response Status (Separated)
-     */
-    public static void logResponseStatus(String refId, String reqId, int statusCode) {
-        log.info("{} [REF: {}][ID: {}] END | Status Code: {}", 
-            TAG, refId, reqId, statusCode);
+    @Override
+    protected void cacheWrite(String id, NbblRequestTraceContext d) {
+        // Set this to 900 (15 minutes) in your config
+        aerospikeUtil.addUpdateCache(
+            AerospikeConstants.NBBL_CALLBACK_TRACE_CACHE, 
+            id, 
+            ttlConfig.getNbblTraceTtl(), 
+            d
+        );
     }
 
-    /**
-     * 4. Log Response Payload (Separated)
-     */
-    public static void logResponseBody(String refId, String reqId, String responseBody) {
-        if (log.isDebugEnabled() && responseBody != null && !responseBody.isEmpty()) {
-            log.debug("{} [REF: {}][ID: {}] RESP-BODY: {}", 
-                TAG, refId, reqId, 
-                CommonUtils.validateForLogForging(SensitiveDataMasker.maskSensitiveJson(responseBody)));
-        }
-    }
-
-    /**
-     * 5. Log Performance Metrics (Separated)
-     * Dedicated to: Performance Tuning & Profiling
-     */
-    public static void logPerformanceMetrics(String refId, String reqId, String url, long duration) {
-        log.info("{} Total time taken for ReferenceId {} and URL {} with ID {}: Time = {}ms",
-            TAG, refId, CommonUtils.validateForLogForging(url), reqId, duration);
+    @Override
+    protected NbblRequestTraceContext cacheRead(String id) {
+        return aerospikeUtil.getRecord(
+            AerospikeConstants.NBBL_CALLBACK_TRACE_CACHE, 
+            id, 
+            NbblRequestTraceContext.class
+        );
     }
 }
 ```
 
 ---
 
-### Why this "Five-Point" Granularity is Elite:
+### 3. Usage Pattern: Validation Flow
 
-1.  **Debugging vs. Profiling:** 
-    *   If you only care about **latency**, you look for the `logPerformanceMetrics` line. 
-    *   If you are debugging a **data issue**, you look for `logResponseBody`. 
-    *   In a high-traffic environment, you can keep `INFO` level for status and timing, while keeping the heavy `DEBUG` bodies completely disabled until needed.
-2.  **Handling "Partial" Failures:** 
-    *   In a scenario where a 3rd party bank returns a `500 Internal Server Error` with **no body**, your code will still call `logResponseStatus`. The granular `logResponseBody` simply won't execute, keeping your logs clean of "null" or "empty" markers.
-3.  **Traceability:** 
-    *   By having a dedicated performance method, you can easily create **Splunk Alerts**. For example: "Alert me if `logPerformanceMetrics` for URL 'X' shows `Time > 5000ms`". This is much easier to parse than trying to extract a number from a long combined string.
-4.  **Async Friendly:** 
-    *   If you decide to log bodies asynchronously (to save main-thread time), having separate methods makes it easy to wrap only the "Body" methods in a background task while keeping the "Status" and "Timing" on the main thread for immediate visibility.
+This logic ensures your "futureStep1" and "futureStep2" are handled in one go with very clear logging.
 
----
-
-### Final Implementation Flow for your Service:
-
+#### When sending the Request (The "Trace" creation):
 ```java
-long startTime = System.currentTimeMillis();
-
-// 1. Start Trace
-OutboundLoggerUtility.logRequestInitiation(refId, reqId, "FEIGN", "POST", url);
-
-// 2. Log Body (If exists)
-OutboundLoggerUtility.logRequestBody(refId, reqId, requestJson);
-
-try {
-    // ... Actual Network Execution ...
-    int status = response.status();
-    String body = response.body();
-
-    // 3. Log Status
-    OutboundLoggerUtility.logResponseStatus(refId, reqId, status);
-
-    // 4. Log Body
-    OutboundLoggerUtility.logResponseBody(refId, reqId, body);
-
-} finally {
-    // 5. Always log performance, even if an exception occurs
-    long duration = System.currentTimeMillis() - startTime;
-    OutboundLoggerUtility.logPerformanceMetrics(refId, reqId, url, duration);
+public void initiateRequest(String refId) {
+    NbblRequestTraceContext trace = NbblRequestTraceContext.builder()
+            .referenceId(refId)
+            .isProcessed(false)
+            .requestTimestamp(System.currentTimeMillis())
+            .build();
+            
+    traceDataManager.save(trace);
+    log.info("[NBBL-CALLBACK-TRACE][INIT] Trace created for RefId: {}", refId);
 }
 ```
 
-**Architect's Verdict:** This is the most **Atomic** approach to logging. Each method has a **Single Responsibility**. This structure is highly robust and perfectly optimized for the **Performance Tuning** purpose you mentioned at the beginning of our session. You now have the ultimate observability tool for your payment system.
+#### When receiving the Callback (The "Validation" check):
+```java
+public void validateCallback(String refId) {
+    // 1. Fetch the Trace Context
+    NbblRequestTraceContext trace = traceDataManager.find(refId);
+
+    // STEP 1: VALIDATE OWNERSHIP (Does it belong to us?)
+    if (trace == null) {
+        log.error("[NBBL-CALLBACK-TRACE][REJECT] RefId {} not found. This request did not originate from this system.", refId);
+        throw new SecurityException("Unauthorized Reference ID");
+    }
+
+    // STEP 2: VALIDATE DUPLICATION (Has it been processed?)
+    if (trace.isProcessed()) {
+        log.warn("[NBBL-CALLBACK-TRACE][DUPLICATE] RefId {} has already been processed. Ignoring duplicate callback.", refId);
+        return; // Exit to avoid double processing
+    }
+
+    // SUCCESS: Proceed and Lock
+    trace.setProcessed(true);
+    traceDataManager.save(trace);
+    
+    log.info("[NBBL-CALLBACK-TRACE][SUCCESS] RefId {} validated successfully. Proceeding to business logic.", refId);
+}
+```
+
+---
+
+### Why these names work:
+
+1.  **Domain Tag (`NBBL-CALLBACK-TRACE`):** When you search your logs in Splunk or ELK, this tag will filter out all the noise and show you exactly the validation lifecycle.
+2.  **DTO Name (`NbblRequestTraceContext`):** No one will confuse "TraceContext" with "ResponseData." It sounds temporary, which fits the 15-minute TTL.
+3.  **Boolean Flag (`isProcessed`):** It is a standard industry term for idempotency checks. It clearly tells the developer: "The callback has already been handled."
+
+### Task for your developers:
+*   **Dev 1:** Update `AerospikeConstants` to include `NBBL_CALLBACK_TRACE_CACHE`.
+*   **Dev 2:** Update `CacheTtlConfig` with `nbblTraceTtl = 900`.
+*   **Both:** Implement the `NbblRequestTraceDataManager` to replace the manual `CompletableFuture` validation steps.
+
+This architecture is clean, highly performant, and easy for your production support team to monitor!
